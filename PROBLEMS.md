@@ -72,10 +72,49 @@ while True:
 
 ---
 
-## 3. Проблема 2 — reconnect-тест виснет ✅❌ (НЕ РЕШЕНА; главная)
+## 3. Проблема 2 — reconnect-тест виснет ✅ (РЕШЕНА)
 
 **Тест:** `tests/test_tunnel.py::test_bridge_reconnects_after_agent_restart`.
-Стабильно виснет (AUDIT: падал 5/5). Это и есть «красный» тест Фазы 3.
+Стабильно виснет (AUDIT: падал 5/5). Это и был «красный» тест Фазы 3.
+**Сейчас зелёный: все 4 integration-теста и весь набор (35/35) проходят.**
+
+### 3.0 Корневая причина + решение (подтверждено ресёрчем)
+
+**Корень (объяснение подтверждено — см. переданный анализ и воспроизведено):**
+`asyncio.Server.serve_forever()` в CPython при отмене делает примерно так:
+```python
+try:
+    await self._serving_forever_fut
+except CancelledError:
+    self.close()
+    await self.wait_closed()   # ← блокирует, пока живой _handle_bridge
+    raise
+```
+Дедлок:
+1. `at.cancel()` → `serve_forever()` ловит `CancelledError` и вызывает
+   `await self.wait_closed()`.
+2. `wait_closed()` ждёт завершения всех активных `_handle_bridge`.
+3. `_handle_bridge` ждёт отмены, которая была в `finally` метода `start()`.
+4. `finally` не выполняется, пока `serve_forever()` не пробросит отмену выше.
+→ взаимное ожидание. Только **повторный** `cancel()` (из `wait_for`) пробивает
+внутренний `await wait_closed()` и запускает `finally` — это и объясняет
+наблюдения (2-й cancel работает).
+
+**Решение (реализовано):** не гнать shutdown через отмену `serve_forever()`.
+`AgentServer` теперь управляет циклом через `asyncio.Event`:
+- `start()`: биндит listener, сохраняет `bound_port`, ждёт `_stop_event.wait()`;
+  `except CancelledError: pass` + `finally: await self._cleanup()`;
+- `stop()`: `_stop_event.set()` + `await self._cleanup()`;
+- `_cleanup()`: закрывает `_bridge_writers` → отменяет и собирает
+  `_bridge_tasks` → `server.close()` + `wait_closed()` **с таймаутом 2.0s**;
+- `_handle_bridge` трекает и task, и writer; `writer.wait_closed()` — с
+  таймаутом 1.0s.
+- добавлен `bound_port` — тест берёт порт из него ДО закрытия сервера
+  (был баг: `agent._server.sockets[0]` читался ПОСЛЕ закрытия).
+- тест вызывает `await agent.stop()` вместо `agent_task.cancel()`.
+
+Обе ветки останова безопасны: и `await agent.stop()`, и `task.cancel()`.
+
 
 ### 3.1 Симптом
 
@@ -309,16 +348,24 @@ after_100ms done=False data_frames_sent=100 semaphore_locked=True
 
 ---
 
-## 6. Приоритет, по моему мнению
+## 6. Статус и приоритет
 
-1. **Закрыть reconnect (Проблема 2).** Это «красный» тест Фазы 3. Похоже,
-   правильный путь — H4 (явный `AgentServer.close()` вместо `task.cancel()`)
-   + фикс теста (сохранить порт до остановки) + проверить H2
-   (`writer.wait_closed()` в finally хендлера).
-2. **Закрыть F-01 (Проблема 3)** — переделать flow control.
-3. Дальше по аудиту: F-07 целиком (lifecycle), затем безопасность и
-   hardening.
+**Текущее состояние:**
+- Проблема 1 (semaphore loop) — решена.
+- Проблема 2 (reconnect hang, F-07) — решена. Весь набор 35/35 зелёный.
+- Проблема 3 (F-01, flow control) — **решена**: семафор, привязанный к встречному
+  DATA, удалён; backpressure через `writer.drain()`. Но **нет** regression-теста
+  на длинный односторонний поток (≥100 MiB) — стоит добавить (см. AUDIT F-01).
+- Mypy — 0 ошибок. Ruff — остаются предсуществующие замечания (broad except,
+  complexity) — это P2.
 
-Связь с трекером (README): Фаза 3 = интеграционные тесты (13a–13d), сейчас
-«в процессе»; 13d (reconnect) — блокер. После зелёного набора — Фаза 4
-(реальный iPhone / iScan / LaunchDaemon).
+**Связь с трекером (README):** Фаза 3 (интеграционные тесты 13a–13d) теперь
+завершена. Дальше — Фаза 4 (реальный iPhone / iScan / LaunchDaemon) и P0-пункты
+аудита (безопасность: F-02..F-05).
+
+**Рекомендуемые следующие шаги:**
+1. Добавить regression-тест на one-way поток (F-01) и, желательно, на
+   stop()/graceful-close без pending tasks.
+2. Закрыть P0 аудита: F-03 (права сокета), F-04 (token file + compare_digest +
+   убрать секрет из логов), F-05 (лимиты), F-02 (fingerprint до токена).
+3. Обновить CLI, если `AgentServer` API изменился (bound_port/stop).

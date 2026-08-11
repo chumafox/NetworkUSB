@@ -143,7 +143,8 @@ async def build_bridge(
     token: str = TEST_TOKEN,
 ) -> tuple[BridgeClient, asyncio.Task, str]:
     cert_path, _, _ = certs
-    agent_port = agent._server.sockets[0].getsockname()[1]
+    agent_port = agent.bound_port
+    assert agent_port is not None
     bridge_sock = os.path.join(sock_dir, "bridge.sock")
 
     # Pre-populate known_hosts so the bridge doesn't see a TOFU prompt
@@ -226,7 +227,8 @@ async def test_fingerprint_saved_on_first_connect(
     agent, agent_task, mock_server = await build_agent(sock_dir, certs)
 
     cert_path, _, _ = certs
-    agent_port = agent._server.sockets[0].getsockname()[1]
+    agent_port = agent.bound_port
+    assert agent_port is not None
 
     # Do NOT pre-populate known_hosts — let the bridge do it
     client_ssl = make_client_ssl_context()
@@ -273,8 +275,10 @@ async def test_bridge_reconnects_after_agent_restart(
     assert data == ECHO_RESPONSE
     w.close()
 
-    # Kill agent + mock usbmuxd
-    agent_task.cancel()
+    # Stop agent + mock usbmuxd. Use the explicit stop() (not task.cancel()):
+    # cancelling serve_forever() deadlocks in Python 3.14 when a bridge is
+    # attached (see PROBLEMS.md §3 / AUDIT F-07).
+    await agent.stop()
     mock_server.close()
     await asyncio.gather(agent_task, return_exceptions=True)
 
@@ -282,12 +286,14 @@ async def test_bridge_reconnects_after_agent_restart(
     await asyncio.sleep(0.3)
     assert not os.path.exists(bridge_sock), "Socket should be removed after disconnect"
 
-    # Restart agent on the same port — bridge will reconnect
+    # Restart agent on the same port — bridge will reconnect.
+    # bound_port was captured at bind time, BEFORE the server was closed.
     usbmuxd_path2 = os.path.join(sock_dir, "usbmuxd2.sock")
     mock_server2 = await start_mock_usbmuxd(usbmuxd_path2)
     cert_path, key_path, _ = certs
     server_ssl = make_server_ssl_context(cert_path, key_path)
-    agent_port = agent._server.sockets[0].getsockname()[1]
+    agent_port = agent.bound_port
+    assert agent_port is not None
 
     agent2 = AgentServer(
         host="127.0.0.1",

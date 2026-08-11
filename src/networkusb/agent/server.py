@@ -91,19 +91,39 @@ class AgentServer:
         self.usbmuxd_path = usbmuxd_path
         self.ssl_context = ssl_context
         self._server: asyncio.Server | None = None
-        # Active bridge connection handlers. Tracked so that a graceful
-        # shutdown (cancelling start()) can force-close attached bridges
-        # instead of hanging forever in server.wait_closed().
+        # Actual bound port (set in start()); read after stop() is NOT reliable
+        # because the server's sockets are closed. Tests/CLI use this instead of
+        # poking _server.sockets post-shutdown.
+        self.bound_port: int | None = None
+        # Active bridge connection handlers + writers. Tracked so a graceful
+        # shutdown can force-close attached bridges instead of hanging in
+        # server.wait_closed() (see note in start()).
         self._bridge_tasks: set[asyncio.Task] = set()
+        self._bridge_writers: set[asyncio.StreamWriter] = set()
+        self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
-        """Start the TCP+TLS listener and serve indefinitely."""
+        """Start the TCP+TLS listener and serve until stop() or cancellation.
+
+        IMPORTANT: we do NOT drive shutdown through ``server.serve_forever()``
+        cancellation. In CPython 3.14, ``serve_forever()`` catches
+        ``CancelledError`` and internally awaits ``wait_closed()``, which blocks
+        forever while any ``_handle_bridge`` coroutine is live — and that
+        handler's own cancellation is triggered from *our* ``finally``, which
+        never runs because ``serve_forever()`` never re-raises. The result is a
+        deadlock (only a *second* cancel() from e.g. ``wait_for`` breaks it).
+
+        Instead we wait on an explicit ``asyncio.Event`` and do the cleanup
+        ourselves with timeouts, so both ``agent.stop()`` and ``task.cancel()``
+        are safe.
+        """
         self._server = await asyncio.start_server(
             self._handle_bridge,
             host=self.host,
             port=self.port,
             ssl=self.ssl_context,
         )
+        self.bound_port = self._server.sockets[0].getsockname()[1]
 
         # Apply TCP keepalive to all listening sockets
         for sock in self._server.sockets:
@@ -115,18 +135,39 @@ class AgentServer:
         addrs = ", ".join(str(s.getsockname()) for s in self._server.sockets)
         logger.info("Agent server listening on %s", addrs)
 
+        self._stop_event.clear()
         try:
-            await self._server.serve_forever()
+            await self._stop_event.wait()
+        except asyncio.CancelledError:
+            pass
         finally:
-            # Force-close any attached bridges before waiting for the server
-            # to finish. Without this, wait_closed() blocks forever because a
-            # live bridge handler is stuck in read_frame().
-            for task in list(self._bridge_tasks):
-                task.cancel()
-            if self._bridge_tasks:
-                await asyncio.gather(*self._bridge_tasks, return_exceptions=True)
+            await self._cleanup()
+
+    async def stop(self) -> None:
+        """Request a graceful shutdown (safe to call from anywhere)."""
+        self._stop_event.set()
+        await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        """Force-close bridges, then close the listener — with timeouts."""
+        # 1. Close transport writers so TLS close_notify handshakes can't block.
+        for writer in list(self._bridge_writers):
+            writer.close()
+        # 2. Cancel + await the bridge handler tasks.
+        for task in list(self._bridge_tasks):
+            task.cancel()
+        if self._bridge_tasks:
+            await asyncio.gather(*self._bridge_tasks, return_exceptions=True)
+            self._bridge_tasks.clear()
+        # 3. Close the listener. wait_closed() still waits for pending TLS
+        #    handshakes that never became handler tasks, so bound it.
+        if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), timeout=2.0)
+            except Exception:
+                logger.warning("Server wait_closed timed out during cleanup")
+            self._server = None
 
     # ------------------------------------------------------------------
     # Bridge connection handler
@@ -146,13 +187,25 @@ class AgentServer:
         peer = writer.get_extra_info("peername", "<unknown>")
         logger.info("Incoming bridge connection from %s", peer)
 
-        # Track this handler so a graceful shutdown can force-close it.
+        # Track this handler + writer so a graceful shutdown can force-close it.
         current = asyncio.current_task()
-        self._bridge_tasks.add(current)
+        if current:
+            self._bridge_tasks.add(current)
+        self._bridge_writers.add(writer)
         try:
             await self._handle_bridge_inner(reader, writer, peer)
+        except asyncio.CancelledError:
+            raise
         finally:
-            self._bridge_tasks.discard(current)
+            if current:
+                self._bridge_tasks.discard(current)
+            self._bridge_writers.discard(writer)
+            writer.close()
+            # Bound wait_closed: a broken/half-open peer must not block teardown.
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except Exception:
+                pass
 
     async def _handle_bridge_inner(
         self,
@@ -289,16 +342,16 @@ class AgentServer:
                     )
 
                 elif msg_type == MsgType.DATA:
-                    session = sessions.get(session_id)
-                    if session is None:
+                    sess = sessions.get(session_id)
+                    if sess is None:
                         logger.debug(
                             "DATA for unknown session %d — sending CLOSE", session_id
                         )
                         await send_frame(MsgType.CLOSE, session_id)
                         continue
                     try:
-                        session.writer.write(payload)
-                        await session.writer.drain()
+                        sess.writer.write(payload)
+                        await sess.writer.drain()
                     except Exception as exc:
                         logger.debug(
                             "Session %d write to usbmuxd failed: %s", session_id, exc

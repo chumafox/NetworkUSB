@@ -15,9 +15,10 @@ Connection lifecycle:
 Session IDs are monotonically increasing uint32 starting at 1.
 They are NOT reset between reconnect attempts.
 
-Flow control: a semaphore(100) limits the number of DATA frames that are
-concurrently queued for sending to agent. When the limit is reached, reading
-from local clients pauses until earlier frames have been drained.
+Backpressure is handled by asyncio's transport-level flow control
+(writer.write() + await writer.drain()) — no frame-counting semaphore.
+A byte tunnel's traffic is not symmetric, so counting in-flight DATA
+frames against reverse DATA would stall one-way transfers (AUDIT F-01).
 """
 
 from __future__ import annotations
@@ -44,7 +45,6 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL = 30.0   # seconds
 CHUNK_SIZE = 65_536          # bytes per local-socket read
 AUTH_TIMEOUT = 10.0          # seconds
-FLOW_CONTROL_LIMIT = 100     # max in-flight DATA frames bridge→agent
 
 
 class BridgeClient:
@@ -79,9 +79,6 @@ class BridgeClient:
 
         # Serialise writes to agent
         self._write_lock = asyncio.Lock()
-
-        # Flow control: at most FLOW_CONTROL_LIMIT DATA frames in transit
-        self._flow_sem = asyncio.Semaphore(FLOW_CONTROL_LIMIT)
 
         # Local UNIX server handle
         self._unix_server: asyncio.Server | None = None
@@ -168,14 +165,6 @@ class BridgeClient:
 
         logger.info("Authenticated to agent %s:%d", self.agent_host, self.agent_port)
         self._agent_writer = writer
-
-        # Fresh flow-control semaphore for this connection. Recreating it here
-        # (instead of trying to "reset" the old one) is correct: asyncio's
-        # Semaphore.release() does NOT raise ValueError when the bound is
-        # exceeded (unlike threading.BoundedSemaphore), so any reset loop that
-        # relies on that exception would spin forever. A fresh semaphore gives
-        # the same "reset to full" effect cleanly.
-        self._flow_sem = asyncio.Semaphore(FLOW_CONTROL_LIMIT)
 
         # ---- Create local UNIX socket ----
         await self._start_unix_server()
@@ -287,20 +276,18 @@ class BridgeClient:
             self._local_clients.pop(session_id, None)
             return
 
-        # Relay local client bytes → agent
+        # Relay local client bytes → agent.
+        # Backpressure is provided by writer.drain() (transport-level), not a
+        # frame-counting semaphore — a byte tunnel's traffic is not symmetric,
+        # so counting in-flight DATA frames against reverse DATA would stall
+        # after 100 one-way chunks (see AUDIT F-01).
         try:
             while True:
                 data = await reader.read(CHUNK_SIZE)
                 if not data:
                     break  # local client closed connection
 
-                # Flow control: wait if too many frames are in transit
-                await self._flow_sem.acquire()
-                try:
-                    await self._send_frame(MsgType.DATA, session_id, data)
-                except Exception:
-                    self._flow_sem.release()
-                    raise
+                await self._send_frame(MsgType.DATA, session_id, data)
 
         except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
             pass
@@ -345,8 +332,6 @@ class BridgeClient:
                 try:
                     local_writer.write(payload)
                     await local_writer.drain()
-                    # Release one flow-control slot now that data reached the client
-                    self._flow_sem.release()
                 except Exception as exc:
                     logger.debug(
                         "Session %d write to local client failed: %s", session_id, exc
@@ -409,7 +394,6 @@ class BridgeClient:
         - Remove socket file
         - Close all local client connections
         - Close agent TCP connection
-        - Reset flow-control semaphore
         """
         # Stop accepting new local clients
         if self._unix_server:
@@ -445,12 +429,6 @@ class BridgeClient:
             except Exception:
                 pass
             self._agent_writer = None
-
-        # NOTE: the flow-control semaphore is intentionally NOT reset here.
-        # It is recreated fresh on the next connection in _connect_and_serve.
-        # (See the comment there: asyncio.Semaphore.release() never raises
-        # ValueError, so a "release until ValueError" reset loop would spin
-        # forever.)
 
     # ------------------------------------------------------------------
     # Backoff generator
