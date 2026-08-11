@@ -242,14 +242,20 @@ mypy src/
 > а не через отмену `serve_forever()` — отмена `serve_forever()` при живом
 > bridge-подключении дедлачит в Python 3.14 (подробности в `PROBLEMS.md` §3).
 
-### ⬜ Фаза 4 — Реальное тестирование
+### ✅ Фаза 4 — Реальное тестирование
 
 | # | Задача | Описание | Статус |
 |---|--------|----------|--------|
-| 14 | Тест с реальным iPhone | Запустить agentna машине с iPhone, bridge на мастере | ⬜ |
-| 15 | Тест iScan через туннель | `iscan report` через NetworkUSB | ⬜ |
+| 14 | Тест с реальным iPhone | Запустить агента на машине с iPhone, bridge на мастере | ✅ |
+| 15 | Тест iScan через туннель | `iscan report` через NetworkUSB | ✅ |
 | 16 | iOS 17+ tunnel | `pymobiledevice3 remote start-tunnel` поверх NetworkUSB | ⬜ |
 | 17 | LaunchDaemon | Проверить автозапуск через `launchctl` | ⬜ |
+
+> Проверено на реальном железе (2026-08-11): iPhone 12 mini (iPhone13,1, iOS 27.0)
+> физически на **Mac Pro** (агент `usbmuxd-agent`), **Mac Air** (мастер,
+> `usbmuxd-bridge`) читал его через TLS-туннель. `pymobiledevice3 usbmux list`,
+> `lockdown info` и `iscan info`/`iscan report` работают через `/tmp/usbmuxd.sock`.
+> Девайс: UDID `00008101-001110291410001E`, серийник FFWDK4JL0GPP.
 
 ### ⬜ Фаза 5 — Production-hardening (опционально)
 
