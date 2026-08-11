@@ -289,7 +289,11 @@ class BridgeClient:
 
                 await self._send_frame(MsgType.DATA, session_id, data)
 
-        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+        except asyncio.CancelledError:
+            # Do NOT swallow cancellation: let it propagate so the task is
+            # properly torn down (cleanup below still runs via finally).
+            raise
+        except (ConnectionResetError, BrokenPipeError):
             pass
         except Exception as exc:
             logger.debug("Session %d local read error: %s", session_id, exc)
