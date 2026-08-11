@@ -2,24 +2,25 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  LaunchDaemon for usbmuxd-agent.
-  Runs as root so it can access /var/run/usbmuxd.
+  NetworkUSB usbmuxd-agent LaunchDaemon (template).
 
-  Installation:
-    1. Edit REPLACE_TOKEN below.
-    2. Copy to /Library/LaunchDaemons/:
-         sudo cp launchdaemons/com.usbmuxd.agent.plist /Library/LaunchDaemons/
-         sudo chown root:wheel /Library/LaunchDaemons/com.usbmuxd.agent.plist
-         sudo chmod 644 /Library/LaunchDaemons/com.usbmuxd.agent.plist
-    3. Load:
-         sudo launchctl load /Library/LaunchDaemons/com.usbmuxd.agent.plist
-    4. Check status:
-         sudo launchctl list | grep usbmuxd
-    5. View logs:
-         tail -f /var/log/usbmuxd-agent.log
+  Runs at boot (as root), keeps the agent alive, restarts on crash.
+  The shared secret is read from a root-owned 0600 file via --token-file,
+  NOT stored in this plist (see PROBLEMS.md F-04).
+  Logging is handled by the agent itself -> /var/log/usbmuxd-agent.log.
+
+  Set __NETWORKUSB_AGENT_BIN__ to the absolute path of the installed agent
+  (e.g. /Users/admin/NetworkUSB/.venv/bin/usbmuxd-agent) and keep
+  /etc/networkusb/token containing the secret (root:wheel 0600).
+
+  Install:
+    sudo cp com.usbmuxd.agent.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.usbmuxd.agent.plist
+    sudo chmod 644 /Library/LaunchDaemons/com.usbmuxd.agent.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.usbmuxd.agent.plist
 
   Uninstall:
-    sudo launchctl unload /Library/LaunchDaemons/com.usbmuxd.agent.plist
+    sudo launchctl bootout system/com.usbmuxd.agent
     sudo rm /Library/LaunchDaemons/com.usbmuxd.agent.plist
 -->
 <plist version="1.0">
@@ -29,48 +30,28 @@
 
     <key>ProgramArguments</key>
     <array>
-        <!-- Adjust path if installed in a virtualenv -->
-        <string>/usr/local/bin/usbmuxd-agent</string>
+        <string>__NETWORKUSB_AGENT_BIN__</string>
         <string>--host</string>
         <string>0.0.0.0</string>
         <string>--port</string>
         <string>8721</string>
-        <string>--token</string>
-        <string>REPLACE_TOKEN</string>
-        <string>--usbmuxd-path</string>
-        <string>/var/run/usbmuxd</string>
+        <string>--token-file</string>
+        <string>/etc/networkusb/token</string>
         <string>--log-level</string>
         <string>INFO</string>
     </array>
 
-    <!-- Start automatically at boot -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Restart if the process exits -->
     <key>KeepAlive</key>
     <true/>
 
-    <!-- Log output -->
-    <key>StandardOutPath</key>
-    <string>/var/log/usbmuxd-agent.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/usbmuxd-agent.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
 
-    <!-- Delay startup to ensure usbmuxd socket is available -->
+    <!-- Throttle restarts (also avoids tight crash loops). -->
     <key>ThrottleInterval</key>
     <integer>5</integer>
-
-    <!-- macOS 10.14+: restrict network access -->
-    <key>Sockets</key>
-    <dict>
-        <key>Listener</key>
-        <dict>
-            <key>SockType</key>
-            <string>stream</string>
-            <key>SockFamily</key>
-            <string>IPv4</string>
-        </dict>
-    </dict>
 </dict>
 </plist>

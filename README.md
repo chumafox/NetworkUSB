@@ -136,18 +136,26 @@ iscan report --open
 ## Установка как LaunchDaemon (автозапуск агента при загрузке)
 
 ```bash
-# Отредактируйте токен в plist
-nano launchdaemons/com.usbmuxd.agent.plist  # заменить REPLACE_TOKEN
+# 1. Укажите путь к установленному агенту в plist (заменить __NETWORKUSB_AGENT_BIN__)
+nano launchdaemons/com.usbmuxd.agent.plist
 
-# Установка
+# 2. Создайте токен-файл (root-owned 0600) — секрет НЕ хранится в plist
+printf '%s' 'YOUR_SECRET_TOKEN' | sudo tee /etc/networkusb/token >/dev/null
+sudo chown root:wheel /etc/networkusb/token && sudo chmod 600 /etc/networkusb/token
+
+# 3. Установка (современный launchctl bootstrap)
 sudo cp launchdaemons/com.usbmuxd.agent.plist /Library/LaunchDaemons/
 sudo chown root:wheel /Library/LaunchDaemons/com.usbmuxd.agent.plist
 sudo chmod 644 /Library/LaunchDaemons/com.usbmuxd.agent.plist
-sudo launchctl load /Library/LaunchDaemons/com.usbmuxd.agent.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.usbmuxd.agent.plist
 
-# Проверка
-sudo launchctl list | grep usbmuxd
+# 4. Проверка
+sudo launchctl print system/com.usbmuxd.agent   # state=running, pid=...
 tail -f /var/log/usbmuxd-agent.log
+
+# Удаление
+sudo launchctl bootout system/com.usbmuxd.agent
+sudo rm /Library/LaunchDaemons/com.usbmuxd.agent.plist
 ```
 
 ---
