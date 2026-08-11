@@ -91,6 +91,10 @@ class AgentServer:
         self.usbmuxd_path = usbmuxd_path
         self.ssl_context = ssl_context
         self._server: asyncio.Server | None = None
+        # Active bridge connection handlers. Tracked so that a graceful
+        # shutdown (cancelling start()) can force-close attached bridges
+        # instead of hanging forever in server.wait_closed().
+        self._bridge_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         """Start the TCP+TLS listener and serve indefinitely."""
@@ -111,8 +115,18 @@ class AgentServer:
         addrs = ", ".join(str(s.getsockname()) for s in self._server.sockets)
         logger.info("Agent server listening on %s", addrs)
 
-        async with self._server:
+        try:
             await self._server.serve_forever()
+        finally:
+            # Force-close any attached bridges before waiting for the server
+            # to finish. Without this, wait_closed() blocks forever because a
+            # live bridge handler is stuck in read_frame().
+            for task in list(self._bridge_tasks):
+                task.cancel()
+            if self._bridge_tasks:
+                await asyncio.gather(*self._bridge_tasks, return_exceptions=True)
+            self._server.close()
+            await self._server.wait_closed()
 
     # ------------------------------------------------------------------
     # Bridge connection handler
@@ -131,6 +145,22 @@ class AgentServer:
         """
         peer = writer.get_extra_info("peername", "<unknown>")
         logger.info("Incoming bridge connection from %s", peer)
+
+        # Track this handler so a graceful shutdown can force-close it.
+        current = asyncio.current_task()
+        self._bridge_tasks.add(current)
+        try:
+            await self._handle_bridge_inner(reader, writer, peer)
+        finally:
+            self._bridge_tasks.discard(current)
+
+    async def _handle_bridge_inner(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        peer,
+    ) -> None:
+        """Authenticate + dispatch frames for one bridge connection."""
 
         # ---- AUTH handshake ----
         try:
