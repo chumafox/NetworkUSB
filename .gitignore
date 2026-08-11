@@ -25,3 +25,7 @@ htmlcov/
 
 # Runtime / local state
 /config/
+
+# Build artifacts
+/menubar/NetworkUSBMenu/NetworkUSBMenu
+/iscan - *.pdf

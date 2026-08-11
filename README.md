@@ -77,6 +77,13 @@ NetworkUSB/
 ├── launchdaemons/
 │   └── com.usbmuxd.agent.plist    # macOS LaunchDaemon (автозапуск агента)
 │
+├── installer/
+│   ├── build_client_pkg.sh        # сборка клиентского инсталлера (.pkg)
+│   └── resources/postinstall      # postinstall: PREFLIGHT + Tailscale + агент
+│
+├── docs/
+│   └── CLIENT_INSTALLER.md        # инструкция: сборка, установка, диагностика
+│
 └── tests/
     ├── test_protocol.py            # 15 unit tests — протокол
     ├── test_tls.py                 # 16 unit tests — TLS, cert, known_hosts
@@ -275,6 +282,7 @@ mypy src/
 | 20 | Метрики сессий | `usbmuxd-agent status` — число активных сессий | ⬜ |
 | 21 | CI/CD | GitHub Actions: lint + test на PR | ⬜ |
 | 22 | Поддержка нескольких bridge | Агент принимает несколько параллельных bridge-подключений | ⬜ |
+| 23 | Клиентский инсталлер (.pkg) | `installer/build_client_pkg.sh` — двойной клик: Tailscale + Python + агент + LaunchDaemon, с PREFLIGHT-проверкой зависимостей | ✅ собрано, проверка на чистой машине — 🔄 |
 
 ---
 

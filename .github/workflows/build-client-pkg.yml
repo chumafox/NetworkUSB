@@ -1,0 +1,35 @@
+name: Build client installer (.pkg)
+
+# Ручной запуск: Actions -> Build client installer -> Run workflow.
+# Перед запуском в Settings -> Secrets and variables -> Actions создай secret
+# TS_AUTHKEY с одноразовым Tailscale auth key (Generate auth key, одиночное
+# использование, срок 1 час). Ключ зашивается в пакет и сгорает при установке.
+on:
+  workflow_dispatch:
+    inputs:
+      hostname:
+        description: 'Tailscale hostname для машины клиента'
+        required: false
+        default: 'networkusb-client'
+      authkey_secret:
+        description: 'Имя GitHub secret с Tailscale auth key'
+        required: false
+        default: 'TS_AUTHKEY'
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pkg
+        env:
+          TS_AUTHKEY: ${{ secrets[github.event.inputs.authkey_secret] }}
+        run: |
+          ./installer/build_client_pkg.sh \
+            --hostname "${{ github.event.inputs.hostname }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetworkUSB-Client-pkg
+          path: dist/*.pkg

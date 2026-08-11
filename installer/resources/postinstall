@@ -1,0 +1,243 @@
+#!/bin/bash
+# =============================================================================
+# NetworkUSB client postinstall — выполняется от root внутри Installer.app.
+#
+# Порядок:
+#   0. PREFLIGHT — проверка зависимостей компьютера. Любой [FAIL] -> отмена
+#      установки (installer покажет "Installation Failed", лог сохраняется).
+#   1. Установка недостающего (Tailscale, uv) — уже установленное пропускаем.
+#   2. Tailnet join по одноразовому auth key (машина появляется у мастера).
+#   3. Python (uv managed) + venv + установка NetworkUSB.
+#   4. Секрет /etc/networkusb/token (генерируется НА МЕСТЕ, в пакете нет).
+#   5. LaunchDaemon com.usbmuxd.agent + запуск.
+#
+# Плейсхолдеры __TS_AUTHKEY__ / __TS_HOSTNAME__ подставляет build_client_pkg.sh.
+# =============================================================================
+set -uo pipefail
+
+PAYLOAD=/opt/networkusb
+LOG=/var/log/networkusb-install.log
+TS_AUTHKEY="__TS_AUTHKEY__"
+TS_HOSTNAME="__TS_HOSTNAME__"
+FAILED=0
+
+log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
+
+{
+echo "======================================================"
+echo "NetworkUSB client install — $(date)"
+echo "======================================================"
+} >> "$LOG"
+
+# --- 0. PREFLIGHT: зависимости -------------------------------------------------
+log "PREFLIGHT: проверка зависимостей компьютера"
+
+run_check() { # run_check <имя> <сообщение_при_ошибке> <bash-код проверки>
+    local name="$1" msg="$2" code="$3"
+    if bash -c "$code"; then
+        log "  [OK]   $name"
+    else
+        log "  [FAIL] $name — $msg"
+        FAILED=1
+    fi
+}
+
+run_check "macOS 13+ (Ventura)"        "слишком старая macOS" \
+    '[[ $(sw_vers -productVersion | cut -d. -f1) -ge 13 ]]'
+run_check "Архитектура arm64/x86_64"   "неподдерживаемая архитектура" \
+    '[[ "$(uname -m)" =~ ^(arm64|x86_64)$ ]]'
+run_check "Свободное место (>= 2 ГБ)"  "освободи место на диске" \
+    '[[ $(df -k / | awk "NR==2{print \$4}") -ge 2097152 ]]'
+run_check "Интернет (pypi.org)"        "нужен доступ в интернет" \
+    'curl -fsS --max-time 10 -o /dev/null https://pypi.org/pypi/typer/json'
+run_check "usbmuxd запущен (/var/run/usbmuxd)" "сервис usbmuxd не запущен" \
+    'test -S /var/run/usbmuxd'
+run_check "iPhone по USB (ioreg)"      "подключи iPhone по USB и нажми «Доверять»" \
+    'ioreg -p IOUSB -l 2>/dev/null | grep -qi iphone'
+
+if [ "$FAILED" != 0 ]; then
+    log ""
+    log "======================================================"
+    log "УСТАНОВКА ПРЕРВАНА — не пройдены проверки зависимостей."
+    log "Исправь отмеченные [FAIL] пункты и запусти инсталлер снова."
+    log "Лог: $LOG"
+    log "======================================================"
+    exit 1
+fi
+log "PREFLIGHT: все проверки пройдены — продолжаем установку"
+
+# --- 1. Tailscale (пропускаем, если уже стоит) ---------------------------------
+TS_BIN=/usr/local/bin/tailscale
+if [ ! -x "$TS_BIN" ]; then
+    log "Установка Tailscale из вложенного pkg..."
+    /usr/sbin/installer -pkg "$PAYLOAD/installer/tailscale.pkg" -target / 2>&1 | tee -a "$LOG"
+    for i in $(seq 1 60); do [ -x "$TS_BIN" ] && break; sleep 1; done
+fi
+if [ -x "$TS_BIN" ]; then
+    log "Tailscale: $("$TS_BIN" version | head -1)"
+else
+    log "ERROR: tailscale CLI не найден после установки"; FAILED=1
+fi
+
+# --- 2. Подключение к tailnet (одноразовый auth key) ---------------------------
+TS_IP=""
+if [ -x "$TS_BIN" ]; then
+    if "$TS_BIN" status >/dev/null 2>&1; then
+        log "Tailscale уже в сети"
+    else
+        log "Подключение к tailnet по auth key..."
+        # up может ждать подтверждения VPN-конфигурации в GUI — не блокируемся
+        "$TS_BIN" up --authkey="$TS_AUTHKEY" ${TS_HOSTNAME:+--hostname="$TS_HOSTNAME"} \
+            >/dev/null 2>&1 &
+        UP_PID=$!
+        ( sleep 90; kill "$UP_PID" 2>/dev/null ) &
+        KILLER_PID=$!
+        wait "$UP_PID" 2>/dev/null
+        kill "$KILLER_PID" 2>/dev/null
+        log "tailscale up завершён (rc=$?)"
+    fi
+    for i in $(seq 1 120); do
+        TS_IP=$("$TS_BIN" ip -4 2>/dev/null | head -1)
+        [ -n "$TS_IP" ] && break
+        sleep 1
+    done
+    log "Tailscale IP: ${TS_IP:-НЕ ПОЛУЧЕН}"
+    [ -n "$TS_IP" ] || { log "ERROR: машина не получила tailnet IP (возможно, нужно подтверждение VPN в System Settings)"; FAILED=1; }
+fi
+
+# --- 3. uv + Python + venv + пакет ----------------------------------------------
+UV_BIN=/usr/local/bin/uv
+if [ ! -x "$UV_BIN" ]; then
+    ARCH="$(uname -m)"
+    UV_TGZ="$PAYLOAD/installer/uv-$ARCH-apple-darwin.tar.gz"
+    if [ -f "$UV_TGZ" ]; then
+        log "Установка uv ($ARCH)..."
+        rm -rf /tmp/uv-install && mkdir -p /tmp/uv-install
+        tar -xzf "$UV_TGZ" -C /tmp/uv-install
+        UV_BIN_SRC="$(find /tmp/uv-install -name uv -type f | head -1)"
+        [ -n "$UV_BIN_SRC" ] && cp "$UV_BIN_SRC" "$UV_BIN" && chmod 755 "$UV_BIN"
+    fi
+fi
+if [ -x "$UV_BIN" ]; then
+    log "uv: $("$UV_BIN" --version)"
+else
+    log "ERROR: uv не установлен"; FAILED=1
+fi
+
+if [ -x "$UV_BIN" ]; then
+    cd "$PAYLOAD"
+    if [ ! -x .venv/bin/python ]; then
+        log "Установка Python 3.14 (uv managed)..."
+        "$UV_BIN" python install 3.14 2>&1 | tee -a "$LOG" || log "WARN: uv python install не удался"
+        log "Создание venv..."
+        "$UV_BIN" venv .venv --python 3.14 2>&1 | tee -a "$LOG" || FAILED=1
+    fi
+    if [ -x .venv/bin/python ]; then
+        log "Установка NetworkUSB в venv..."
+        "$UV_BIN" pip install --python .venv/bin/python -e . 2>&1 | tee -a "$LOG"
+        [ -x .venv/bin/usbmuxd-agent ] && log "agent binary: OK" \
+            || { log "ERROR: usbmuxd-agent не собран"; FAILED=1; }
+    else
+        log "ERROR: venv не создан"; FAILED=1
+    fi
+fi
+
+# --- 4. Секрет и сертификаты (генерируются на месте) ----------------------------
+mkdir -p /etc/networkusb
+if [ ! -s /etc/networkusb/token ]; then
+    log "Генерация общего секрета (32 байта)..."
+    umask 077
+    openssl rand -hex 32 > /etc/networkusb/token
+fi
+chown root:wheel /etc/networkusb/token && chmod 600 /etc/networkusb/token
+mkdir -p /etc/networkusb/certs
+chown root:wheel /etc/networkusb/certs && chmod 700 /etc/networkusb/certs
+test -s /etc/networkusb/token && log "Секрет: OK" || { log "ERROR: секрет не создан"; FAILED=1; }
+
+# --- 5. LaunchDaemon ------------------------------------------------------------
+AGENT_BIN="$PAYLOAD/.venv/bin/usbmuxd-agent"
+cat > /Library/LaunchDaemons/com.usbmuxd.agent.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.usbmuxd.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$AGENT_BIN</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8721</string>
+        <string>--token-file</string>
+        <string>/etc/networkusb/token</string>
+        <string>--cert-dir</string>
+        <string>/etc/networkusb/certs</string>
+        <string>--log-level</string>
+        <string>INFO</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>
+PLIST
+chown root:wheel /Library/LaunchDaemons/com.usbmuxd.agent.plist
+chmod 644 /Library/LaunchDaemons/com.usbmuxd.agent.plist
+
+log "Перезапуск LaunchDaemon..."
+launchctl bootout system/com.usbmuxd.agent 2>/dev/null || true
+sleep 1
+launchctl bootstrap system /Library/LaunchDaemons/com.usbmuxd.agent.plist 2>&1 | tee -a "$LOG" \
+    || { log "ERROR: bootstrap не удался"; FAILED=1; }
+
+# --- 6. Фаервол (best effort: разрешить python-бинарь) ---------------------------
+FW=/usr/libexec/ApplicationFirewall/socketfilterfw
+if [ -x "$FW" ] && [ -x "$PAYLOAD/.venv/bin/python" ]; then
+    PYREAL="$("$PAYLOAD/.venv/bin/python" -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$PAYLOAD/.venv/bin/python" 2>/dev/null)"
+    if [ -n "$PYREAL" ]; then
+        "$FW" --add "$PYREAL"      >/dev/null 2>&1 || true
+        "$FW" --unblockapp "$PYREAL" >/dev/null 2>&1 || true
+    fi
+fi
+
+# --- 7. Проверка итога -----------------------------------------------------------
+sleep 3
+STATE="$(launchctl print system/com.usbmuxd.agent 2>/dev/null | awk '/state =/{print $3; exit}')"
+LISTEN="$(lsof -nP -iTCP:8721 -sTCP:LISTEN 2>/dev/null | tail -n +2 | head -1)"
+log "Агент state: ${STATE:-unknown}"
+log "Listener :8721: ${LISTEN:-НЕ СЛУШАЕТ}"
+[ "$STATE" = "running" ] || { log "ERROR: агент не в состоянии running"; FAILED=1; }
+
+cat > /etc/networkusb/INSTALL_SUMMARY.txt <<EOF
+NetworkUSB client install — $(date)
+Tailscale IP: ${TS_IP:-N/A}
+Hostname: $(hostname)
+Agent state: ${STATE:-unknown}
+Listener :8721: ${LISTEN:-none}
+EOF
+chmod 600 /etc/networkusb/INSTALL_SUMMARY.txt
+
+# --- 8. Зачистка вложенных ассетов ------------------------------------------------
+rm -rf "$PAYLOAD/installer" /tmp/uv-install
+
+if [ "$FAILED" = 0 ]; then
+    log ""
+    log "======================================================"
+    log "ГОТОВО. Машина в tailnet (IP: ${TS_IP}), агент слушает :8721."
+    log "Скажи мастеру имя машины — он найдёт её в tailnet."
+    log "======================================================"
+    exit 0
+else
+    log ""
+    log "======================================================"
+    log "Установка завершилась с ошибками — см. лог: $LOG"
+    log "======================================================"
+    exit 1
+fi
