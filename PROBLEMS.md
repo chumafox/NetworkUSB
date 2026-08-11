@@ -1,86 +1,194 @@
-# NetworkUSB — журнал проблем при отладке
+# NetworkUSB — журнал отладки (максимум вводных данных)
 
-Файл фиксирует проблемы, с которыми я (CLI-агент) столкнулся в ходе отладки
-интеграционных тестов (Фаза 3 трекера). Обновляется по мере работы.
-
-Статус меток:
-- ✅ решено (в коде)
-- 🔄 в процессе / остаётся открытым
+> Файл собирает **все** факты, наблюдения, дампы, эксперименты и гипотезы,
+> накопленные при отладке интеграционных тестов (Фаза 3 трекера), для
+> глубокого ресёрча. Ничего не отфильтровано: включаю и то, что не до конца
+> объяснено, и противоречия.
+>
+> База кода: commit `b4bb576` (после моих фиксов). Репо: `chumafox/NetworkUSB`.
 
 ---
 
-## Проблема 1 — бесконечный цикл сброса семафора в bridge ✅
+## 1. Окружение (точно, важно для воспроизводимости)
 
-**Симптом.** `tests/test_tunnel.py` виснет на этапе teardown: `gather()` не
-возвращается, event loop «крутится» на 100% CPU (в `sample` — непрерывный
-`task_step`).
+| Параметр | Значение |
+|---|---|
+| macOS | 27.0 |
+| Python | **3.14.6** (`/opt/homebrew/Cellar/python@3.14/3.14.6`) |
+| asyncio selector | KqueueSelector |
+| pytest | 9.1.1 |
+| pytest-asyncio | 1.4.0 (`asyncio_mode = "auto"`) |
+| pytest-cov | 7.1.0 |
+| Целевой Python по pyproject | `>=3.11` |
 
-**Стек (через `sys._current_frames()`):**
+Проект ставится как editable в `.venv`. Тесты: `tests/test_protocol.py` (15),
+`tests/test_tls.py` (16) — **проходят**. `tests/test_tunnel.py` (4) — **1–3
+проходят, 4-й (reconnect) висит**.
+
+---
+
+## 2. Проблема 1 — бесконечный цикл сброса семафора в bridge ✅ (РЕШЕНА)
+
+**Файл:** `src/networkusb/bridge/client.py`, `_teardown()`.
+
+**Симптом.** Тесты висли на teardown; event loop «крутился» на 100% CPU
+(в `sample` — непрерывный `task_step`, main-thread в `task_wakeup_lock_held`).
+
+**Стек (через `sys._current_frames()` из фонового потока):**
 ```
 bridge/client.py:445 in _teardown
 bridge/client.py:189 in _connect_and_serve
 bridge/client.py:103 in run
 ```
 
-**Корень.** В `_teardown()` был такой «сброс» flow-control семафора:
+**Корень.** В `_teardown()` был цикл:
 ```python
 while True:
     try:
         self._flow_sem.release()
     except ValueError:
-        break  # semaphore already at max — done
+        break  # "semaphore already at max — done"
 ```
-Автор подразумевал поведение `threading.BoundedSemaphore`, где `release()`
-сверх границы бросает `ValueError`. Но это **`asyncio.Semaphore`**, у которого
-`release()` границы не проверяет и `ValueError` **не бросает** — просто
-инкрементирует `_value` бесконечно. Цикл никогда не выходит → бесконечный
-busy-loop → луп блокируется.
+Автор исходил из поведения `threading.BoundedSemaphore` (release сверх границы
+бросает `ValueError`). Но `self._flow_sem` — это **`asyncio.Semaphore`**, у
+которого `release()` **не имеет границы и не бросает `ValueError`** — просто
+инкрементирует `_value`. Цикл бесконечный → busy-loop → луп залипает.
 
-**Фикс.** Убрал сломанный цикл из `_teardown()` и вместо него пересоздаю
-семафор заново на каждое подключение в `_connect_and_serve()`:
-```python
-self._flow_sem = asyncio.Semaphore(FLOW_CONTROL_LIMIT)
-```
+**Проверка факта (независимо):** в asyncio `Semaphore.release()` =
+`self._value += 1; self._wake_up_next()` — исключение не кидает (в отличие от
+`threading.BoundedSemaphore`).
+
+**Мой фикс (в `b4bb576`):**
+- убрал сломанный цикл из `_teardown()`;
+- в `_connect_and_serve()` пересоздаю семафор на каждое подключение:
+  ```python
+  self._flow_sem = asyncio.Semaphore(FLOW_CONTROL_LIMIT)
+  ```
 Эффект «сброса в полный» тот же, но без зависания.
+
+**Важно (незакрытый хвост):** это лечит только *зависание teardown*. Сам
+**дизайн** flow control неверен — см. Проблему 3 (F-01). Пересоздание семафора
+не устраняет дефект «release привязан к встречному DATA».
 
 ---
 
-## Проблема 2 — graceful shutdown агента виснет, если bridge ещё подключён ✅
+## 3. Проблема 2 — reconnect-тест виснет ✅❌ (НЕ РЕШЕНА; главная)
 
-**Симптом.** Тест `test_bridge_reconnects_after_agent_restart` виснет на
-`await asyncio.gather(agent_task, ...)` после `agent_task.cancel()`. Event loop
-при этом **idle** (в `select`) — это не busy-loop, а вечное ожидание.
+**Тест:** `tests/test_tunnel.py::test_bridge_reconnects_after_agent_restart`.
+Стабильно виснет (AUDIT: падал 5/5). Это и есть «красный» тест Фазы 3.
 
-**Стек:**
+### 3.1 Симптом
+
+- В `pytest` тест проходит setup (bridge-сокет создан) и дальше не завершается.
+- В изолированном сценарии зависает на строке:
+  ```python
+  at.cancel()
+  mock.close()
+  await asyncio.gather(at, return_exceptions=True)   # ← виснет здесь
+  ```
+  где `at = asyncio.create_task(agent.start())`.
+
+### 3.2 Репродукция (скрипты, которые можно запустить)
+
+| Скрипт | Что делает | Результат |
+|---|---|---|
+| `/tmp/nusb_rec.py` | полный reconnect-сценарий (mock usbmuxd + agent + bridge + roundtrip + cancel agent + restart) | виснет на `gather(at)`; стек гл. потока: idle в `select` (loop жив, но `await gather` не возвращается) |
+| `/tmp/nusb_rec2.py` | то же + дамп **тасков** через `run_coroutine_threadsafe` (таймер 10с) | см. дамп ниже |
+| `/tmp/nusb_rec3.py` | то же + DEBUG-логирование в `/tmp/rec3_debug.log` + `wait_for(gather,6)` | см. хронологию |
+| `/tmp/test_sf.py` | чистый `serve_forever()` без соединений + `cancel()` | **останавливается корректно** (CancelledError) |
+| `/tmp/test_sf2.py` | `serve_forever()` + активное (pending TLS-handshake) подключение + `cancel()` | **НЕ останавливается; TIMEOUT** |
+| `/tmp/test_sf3.py` | `srv.close() + wait_closed()` + pending TLS-подключение | **TIMEOUT**, sf.done()=False |
+
+Запуск из корня проекта: `.venv/bin/python -u /tmp/nusb_rec2.py` и т.п.
+Скрипты лежат в `/tmp`, но их стоит перенести в репо при доработке.
+
+### 3.3 Хронология отладочного запуска (`rec3`, `/tmp/rec3_debug.log`)
+
 ```
-agent/server.py  start()  →  async with self._server  →  server.wait_closed()
+12:34:44,432  asyncio: Using selector: KqueueSelector
+12:34:44,491  agent: Agent server listening on ('127.0.0.1', 59738)
+12:34:44,794  bridge: Connecting to agent
+12:34:44,804  bridge: TCP+TLS handshake complete
+12:34:44,805  agent: Incoming bridge connection
+12:34:44,805  agent: Bridge authenticated successfully
+12:34:44,805  bridge: Authenticated to agent
+12:34:44,806  bridge: Local UNIX socket ready
+12:34:45,295  bridge: Local client → session 1
+12:34:45,296  agent: CONNECT session 1
+12:34:45,297  agent: Session 1: usbmuxd closed connection
+12:34:45,297  bridge: Agent closed session 1
+12:34:45,297  bridge: Session 1 local client closed
+12:34:45,298  agent: CLOSE session 1
+   ↑ roundtrip ОК, local client закрыт, агент получил CLOSE
+   ─── здесь вызывается at.cancel() (~45.3) ───
+   [ДАЛЕЕ ~6 секунд НИЧЕГО]
+12:34:51,502  bridge: Agent connection error: 0 bytes read on a total of 9 expected bytes
+12:34:51,502  bridge: Reconnecting to agent in 1 s...
+12:34:51,503  agent: Bridge cleaned up; closed 0 usbmuxd session(s)
+   ↑ :51.5 — это сработал wait_for(6): он отменил gather → отменил at →
+     finally агента выполнился → bridge увидел закрытие → «cleaned up»
+12:34:56,509  bridge: Bridge stopped
 ```
 
-**Корень.** `AgentServer.start()` делал:
-```python
-async with self._server:
-    await self._server.serve_forever()
+**Главный вывод хронологии:** явный `at.cancel()` в ~45.3 **не** вызвал
+очистку. Очистка произошла только через ~6с, когда `wait_for` **повторно**
+отменил `at`. То есть первый `cancel()` «не сработал», второй — сработал.
+
+### 3.4 Дамп стека тасков (`rec2`, момент ~10с после старта)
+
 ```
-При отмене (`cancel()`) контекстный менеджер зовёт `server.close()` +
-`server.wait_closed()`. `wait_closed()` ждёт завершения всех активных
-обработчиков подключений. Bridge ещё подключён и висит в `read_frame()`
-(ждёт следующий фрейм), поэтому `_handle_bridge` не завершается → `wait_closed()`
-висит вечно.
+--- task bridge-heartbeat  done=False cancelled=False
+      client.py:375 in _heartbeat_loop
+--- task agent            done=False cancelled=False
+      server.py:119 in start            ← это «await serve_forever()»
+--- task Task-1           done=False cancelled=False
+      /tmp/nusb_rec2.py:78 in main      ← «await asyncio.gather(at)»
+--- task bridge           done=False cancelled=False
+      client.py:103 in run
+--- task Task-4           done=False cancelled=False
+      server.py:153 in _handle_bridge   ← «await _handle_bridge_inner(...)»
+--- task Task-5           done=False cancelled=False
+      server.py:251 in heartbeat_watchdog
+```
 
-Почему тест 1 (`test_basic_roundtrip`) проходил: там в teardown сначала
-отменяли **bridge** — тот закрывал соединение с агентом, агент получал EOF,
-`_handle_bridge` завершался, и только потом `wait_closed()` возвращался.
-В тесте reconnect отменяют **агента** при живом bridge → дедлок.
+**Противоречие:** `at.cancel()` вызван (~1.2с), но к 10с таск `agent` —
+`cancelled=False` и всё ещё в `serve_forever()`. При этом loop **жив** (bridge
+переподключается, heartbeat_watchdog крутится). Почему отмена не доставлена —
+не объяснено. (Ср. с `wait_for`, чья отмена — доставилась.)
 
-Это не только тестовая проблема: реальный агент при остановке (SIGTERM /
-`launchctl stop`) должен принудительно закрывать активные bridge-подключения.
+### 3.5 Три эксперимента по `serve_forever` (точные выводы)
 
-**Фикс.** Агент теперь трекает активные хендлеры bridge:
-- в `__init__`: `self._bridge_tasks: set[asyncio.Task] = set()`;
-- `_handle_bridge` регистрирует `asyncio.current_task()` и снимает его в `finally`;
-- `start()` при выходе сначала **отменяет** все `_bridge_tasks`, дожидается их
-  (`gather`), и только потом `server.close()` + `wait_closed()`.
+1. **`test_sf.py`** — `serve_forever()` без соединений, `cancel()`:
+   → `serve_forever raised CancelledError`, `cancelled()=True`. Чистая отмена
+   работает. **Значит сам по себе `serve_forever` отменяем.**
 
+2. **`test_sf2.py`** — то же, но перед `cancel()` открыто raw-соединение на
+   TLS-порт (handshake не завершён):
+   → `>>> TIMEOUT: serve_forever did NOT stop on cancel`; затем после повторной
+   отмены `cancelled()=True done()=True`.
+   **Наличие активного/pending соединения ломает отмену; повторная отмена
+   добивает.** Это 1-в-1 поведение reconnect-теста.
+
+3. **`test_sf3.py`** — вместо `cancel()`: `srv.close() + await srv.wait_closed()`
+   при pending TLS-подключении:
+   → `>>> wait_closed() TIMEOUT`, `sf.done()=False`.
+   **`wait_closed()` ждёт все активные обработчики; незавершённый TLS-handshake
+   держит его вечно.**
+
+### 3.6 Ключевые наблюдения (итог)
+
+- Loop остаётся живым (bridge: heartbeat, reconnect работают) — это **не**
+  busy-loop и не блокировка loop; это «вечное ожидание» в `await gather(at)`.
+- Явная отмена таска `serve_forever` не доставляется/не останавливает при
+  живом соединении; повторная отмена — доставляет.
+- `wait_closed()` виснет при любом активном обработчике (в т.ч. pending
+  handshake, и, по логике, при живом `_handle_bridge`, читающем фреймы).
+- В тесте bridge-сокет после «restart» не пересоздаётся (assert на
+  `os.path.exists(bridge_sock)` не достигается из-за зависания раньше).
+
+### 3.7 Что я уже попробовал (фиксы) и почему не сработало
+
+**Фикс A (в `b4bb576`):** `AgentServer.start()` теперь:
 ```python
 try:
     await self._server.serve_forever()
@@ -92,16 +200,125 @@ finally:
     self._server.close()
     await self._server.wait_closed()
 ```
++ `_handle_bridge` регистрирует `asyncio.current_task()` в `self._bridge_tasks`
+и снимает в `finally`; добавлен прослойка `_handle_bridge_inner`.
+
+**Результат:** reconnect всё равно виснет. Т.е. «force-close bridge-хендлеров в
+finally агента» недостаточно: либо отмена до finally не доходит (см. 3.4),
+либо `await writer.wait_closed()` внутри finally хендлера сам виснет (не
+проверено точно — см. гипотезы).
+
+### 3.8 Гипотезы (для ресёрча)
+
+1. **Гипотеза H1 (отмена не доставляется).** В Python 3.14 при живом
+   connection `cancel()` на таске `serve_forever` не прерывает его (см.
+   test_sf2). Причина — во внутренней обработке `Server.serve_forever()`
+   + `wait_closed()` в его cleanup, который блокируется на активном
+   хендлере. Надо смотреть исходник `asyncio/base_events.py` / `Server`
+   в 3.14.
+
+2. **Гипотеза H2 (`writer.wait_closed()` в finally хендлера).** В
+   `_handle_bridge_inner` в `finally` есть `writer.close(); await
+   writer.wait_closed()`. Для TLS-writer к всё ещё подключённому bridge это
+   может не завершиться (close_notify / flush). Тогда `gather(bridge_tasks)`
+   в finally агента висит. **Нужно проверить**: заменить на
+   `writer.close()` без `await wait_closed()`, либо `await
+   asyncio.shield(...)`/timeout.
+
+3. **Гипотеза H3 (тест читает порт после закрытия сервера — из AUDIT F-07).**
+   Тест делает:
+   ```python
+   agent_task.cancel()
+   mock_server.close()
+   await asyncio.gather(agent_task, return_exceptions=True)
+   ...
+   agent_port = agent._server.sockets[0].getsockname()[1]  # ← ПОСЛЕ закрытия!
+   ```
+   После закрытия `self._server.sockets` пуст → `IndexError`, а не зависание.
+   Но это отдельный баг теста: **порт надо сохранять до остановки**. Не
+   объясняет зависание, но мешает после исправления основной причины.
+
+4. **Гипотеза H4 (архитектурная, из AUDIT F-07).** Правильно не полагаться на
+   `task.cancel()`: дать `AgentServer` явные `async close()/wait_closed()`,
+   которые (а) `server.close()`, (б) закрывают все активные bridge-хендлеры
+   (cancel + timeout на `wait_closed`), (в) затем `wait_closed()` с deadline.
+   Тест звать `await agent.close()` вместо `agent_task.cancel()`.
+
+### 3.9 Что говорит AUDIT.md (ваш отчёт) — по reconnect-тесту
+
+Из F-07 (дословно):
+> «отмена `agent.start()` закрывает listener, но не активное bridge-соединение
+> в том же event loop; Bridge не замечает „рестарт“ и socket остаётся».
+> «порт надо сохранить до остановки» (про `agent._server.sockets[0]` после
+> закрытия).
+> Рекомендация: явные `async start()/close()/wait_closed()`, `TaskGroup` для
+> connection/session tasks, cancellation-safe `finally`, ожидание всех writers,
+> идемпотентный teardown. `stop()` должен ставить event и закрывать transport.
+
+Также F-07 перечисляет: `_handle_local_client` глотает `CancelledError` и не
+пробрасывает; client handler tasks не трекаются и не ожидаются при teardown;
+ряд `StreamWriter` закрывается без `await wait_closed()`.
 
 ---
 
-## Статус на текущий момент
+## 4. Проблема 3 — Flow control сломан по дизайну (F-01, Critical) ❌ (НЕ РЕШЕНА)
 
-Первые 3 интеграционных теста после Проблемы 1 проходят:
-- `test_basic_roundtrip` ✅
-- `test_multiple_sequential_sessions` ✅
-- `test_fingerprint_saved_on_first_connect` ✅
+**Файл:** `src/networkusb/bridge/client.py:83-84` (семафор), `297-304`
+(acquire/release), `347-349` (release по DATA).
 
-После фикса Проблемы 2 (агент закрывает bridge при shutdown) ожидается, что
-4-й тест тоже пройдёт. Если `test_tunnel.py` по-прежнему виснет — обновить этот
-файл, указав новый стек/симптом.
+**Суть (из AUDIT F-01 + моё подтверждение):**
+Bridge захватывает один слот семафора на каждый исходящий DATA-фрейм, а
+освобождает только при получении встречного DATA. В байтовом туннеле встречный
+DATA **не является ACK**: соотношение потоков 0:1, 1:N, N:1.
+
+**Следствие:** если локальный клиент отправил 100 chunk-ов (по 64KiB ≈ 6.25
+MiB), а устройство ещё не ответило, 101-й chunk ждёт вечно. Семафор общий для
+Bridge → одна сессия блокирует исходящую передачу всех сессий. Отдельное
+воспроизведение из AUDIT:
+```
+after_100ms done=False data_frames_sent=100 semaphore_locked=True
+```
+
+**Мой фикс (пересоздание семафора при коннекте) НЕ решает это** — он лишь
+убрал зависание teardown. Для корректной работы нужно (по AUDIT):
+- убрать связь release со встречным DATA;
+- минимально — полагаться на `writer.write() + await writer.drain()`
+  (transport backpressure);
+- предпочтительно — один dedicated writer task + bounded очередь по **байтам**;
+- при необходимости — добавить в протокол `WINDOW_UPDATE`/ACK;
+- regression-тест: ≥100 MiB одностороннего потока без ответа.
+
+---
+
+## 5. Прочие находки AUDIT, которые стоит учесть при ресёрче
+
+- **Mypy:** 1 ошибка — несовместимое присваивание `UsbmuxdSession | None` в
+  переменную, выведенную как `UsbmuxdSession` (`agent/server.py:262`).
+- **Ruff:** 59 замечаний (26 broad except, 15 silent pass, импорты); у
+  `_handle_bridge` cyclomatic complexity 32, 19 веток, 128 операторов.
+- **Bandit:** 1 High (chmod 0777 локального сокета), 3 Medium.
+- **Безопасность (F-02..F-05):** TOFU не защищает первое соединение; сокет
+  `/tmp/usbmuxd.sock` + chmod 0777; токен в CLI/plist/логах (первые 20 символов
+  AUTH строки пишутся в лог при неуспехе); нет лимитов соединений/сессий.
+- **Прочее (F-08..F-12):** heartbeat только на агенте; backoff не сбрасывается
+  и без jitter; нет валидации фреймов/uint32 wrap; запись cert/known_hosts
+  неатомарна; `check_unix_socket_accessible` есть в `utils.py`, но CLI его не
+  использует.
+
+Полный разбор — в `AUDIT.md` (ветка `arena/019fef0d-networkusb`, 465 строк).
+
+---
+
+## 6. Приоритет, по моему мнению
+
+1. **Закрыть reconnect (Проблема 2).** Это «красный» тест Фазы 3. Похоже,
+   правильный путь — H4 (явный `AgentServer.close()` вместо `task.cancel()`)
+   + фикс теста (сохранить порт до остановки) + проверить H2
+   (`writer.wait_closed()` в finally хендлера).
+2. **Закрыть F-01 (Проблема 3)** — переделать flow control.
+3. Дальше по аудиту: F-07 целиком (lifecycle), затем безопасность и
+   hardening.
+
+Связь с трекером (README): Фаза 3 = интеграционные тесты (13a–13d), сейчас
+«в процессе»; 13d (reconnect) — блокер. После зелёного набора — Фаза 4
+(реальный iPhone / iScan / LaunchDaemon).
