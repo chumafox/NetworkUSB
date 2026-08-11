@@ -51,10 +51,17 @@ def main(
         8721, "--port", show_default=True, help="TCP port to listen on"
     ),
     token: str = typer.Option(
-        ...,
+        "",
         "--token",
         envvar="USBMUXD_TOKEN",
         help="Shared secret used to authenticate bridge connections",
+    ),
+    token_file: Path | None = typer.Option(
+        None,
+        "--token-file",
+        help="Read the shared secret from this file (root-owned 0600). "
+        "Takes precedence over --token/USBMUXD_TOKEN; recommended for "
+        "LaunchDaemon deployment.",
     ),
     usbmuxd_path: str = typer.Option(
         "/var/run/usbmuxd",
@@ -133,10 +140,29 @@ def main(
         )
     )
 
+    # ---- Resolve shared secret (--token-file > --token / USBMUXD_TOKEN) ----
+    if token_file is not None:
+        token_file = token_file.expanduser()
+        if not token_file.is_file():
+            console.print(f"[bold red]Token file not found:[/bold red] {token_file}")
+            raise typer.Exit(1)
+        resolved_token = token_file.read_text(encoding="utf-8").strip()
+        if not resolved_token:
+            console.print(f"[bold red]Token file is empty:[/bold red] {token_file}")
+            raise typer.Exit(1)
+    else:
+        resolved_token = token
+    if not resolved_token:
+        console.print(
+            "[bold red]No token provided.[/bold red]\n"
+            "Pass --token, set USBMUXD_TOKEN, or use --token-file."
+        )
+        raise typer.Exit(1)
+
     server = AgentServer(
         host=host,
         port=port,
-        token=token,
+        token=resolved_token,
         usbmuxd_path=usbmuxd_path,
         ssl_context=ssl_ctx,
     )

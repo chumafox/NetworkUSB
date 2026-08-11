@@ -160,7 +160,8 @@ tail -f /var/log/usbmuxd-agent.log
 |----------|---------|----------|
 | `--host` | `0.0.0.0` | IP для прослушивания |
 | `--port` | `8721` | TCP порт |
-| `--token` | — | Токен аутентификации (обязательный) |
+| `--token` | — | Токен аутентификации (обязательный, если нет `--token-file`) |
+| `--token-file` | — | Путь к файлу секрета (root 0600). Приоритетнее `--token`/`USBMUXD_TOKEN` |
 | `--usbmuxd-path` | `/var/run/usbmuxd` | Путь к локальному usbmuxd сокету |
 | `--cert-dir` | `~/.config/usbmuxd-agent` | Директория TLS-сертификата |
 | `--log-level` | `INFO` | DEBUG / INFO / WARNING / ERROR |
@@ -248,8 +249,8 @@ mypy src/
 |---|--------|----------|--------|
 | 14 | Тест с реальным iPhone | Запустить агента на машине с iPhone, bridge на мастере | ✅ |
 | 15 | Тест iScan через туннель | `iscan report` через NetworkUSB | ✅ |
-| 16 | iOS 17+ tunnel | `pymobiledevice3 remote start-tunnel` поверх NetworkUSB | ⬜ |
-| 17 | LaunchDaemon | Проверить автозапуск через `launchctl` | ⬜ |
+| 16 | iOS 17+ tunnel | `pymobiledevice3 remote start-tunnel` поверх NetworkUSB | ✅ не требуется |
+| 17 | LaunchDaemon | Проверить автозапуск через `launchctl` | 🔄 |
 
 > Проверено на реальном железе (2026-08-11): iPhone 12 mini (iPhone13,1, iOS 27.0)
 > физически на **Mac Pro** (агент `usbmuxd-agent`), **Mac Air** (мастер,
