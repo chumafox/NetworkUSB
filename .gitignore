@@ -29,3 +29,6 @@ htmlcov/
 # Build artifacts
 /menubar/NetworkUSBMenu/NetworkUSBMenu
 /iscan - *.pdf
+
+# Vendored third-party binaries (подкладываются на машине сборки, не в git)
+/installer/third_party/

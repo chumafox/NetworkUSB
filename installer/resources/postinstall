@@ -66,50 +66,99 @@ if [ "$FAILED" != 0 ]; then
 fi
 log "PREFLIGHT: все проверки пройдены — продолжаем установку"
 
-# --- 1. Tailscale (пропускаем, если уже стоит) ---------------------------------
-TS_BIN=/usr/local/bin/tailscale
+# --- 1. Tailscale: headless tailscaled (userspace, без GUI) --------------------
+TS_BIN=/usr/local/bin/tailscaled
+TS_CLI=/usr/local/bin/tailscale
+TS_SOCK=/var/run/tailscale/tailscaled.sock
+TS_STATE=/var/lib/tailscale/tailscaled.state
+TS_IP=""
+ARCH="$(uname -m)"; [ "$ARCH" = "x86_64" ] && TS_ARCH=amd64 || TS_ARCH=arm64
+TS_SRC="$PAYLOAD/installer/tailscaled/$TS_ARCH"
+
 if [ ! -x "$TS_BIN" ]; then
-    log "Установка Tailscale из вложенного pkg..."
-    /usr/sbin/installer -pkg "$PAYLOAD/installer/tailscale.pkg" -target / 2>&1 | tee -a "$LOG"
-    for i in $(seq 1 60); do [ -x "$TS_BIN" ] && break; sleep 1; done
+    if [ -x "$TS_SRC/tailscaled" ]; then
+        log "Установка headless tailscaled ($TS_ARCH)..."
+        cp "$TS_SRC/tailscaled" "$TS_BIN" && chmod 755 "$TS_BIN"
+        cp "$TS_SRC/tailscale"  "$TS_CLI" && chmod 755 "$TS_CLI"
+    fi
 fi
-if [ -x "$TS_BIN" ]; then
-    log "Tailscale: $("$TS_BIN" version | head -1)"
+if [ ! -x "$TS_BIN" ]; then
+    log "ERROR: tailscaled не установлен"; FAILED=1
 else
-    log "ERROR: tailscale CLI не найден после установки"; FAILED=1
+    log "tailscaled: $("$TS_BIN" --version | head -1)"
+    mkdir -p /var/lib/tailscale /var/run/tailscale
+    chmod 700 /var/lib/tailscale
+    # LaunchDaemon: userspace-networking — БЕЗ Network Extension, значит без
+    # GUI-запроса «VPN-конфигурация» и без онбординга (полная тишина).
+    cat > /Library/LaunchDaemons/com.tailscale.headless.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tailscale.headless</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$TS_BIN</string>
+        <string>--tun=userspace-networking</string>
+        <string>--state=$TS_STATE</string>
+        <string>--socket=$TS_SOCK</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/tailscaled.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/tailscaled.log</string>
+</dict>
+</plist>
+PLIST
+    chown root:wheel /Library/LaunchDaemons/com.tailscale.headless.plist
+    chmod 644 /Library/LaunchDaemons/com.tailscale.headless.plist
+    launchctl bootout system/com.tailscale.headless 2>/dev/null || true
+    sleep 1
+    launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.headless.plist 2>&1 | tee -a "$LOG" || true
+    for i in $(seq 1 60); do [ -S "$TS_SOCK" ] && break; sleep 1; done
+    [ -S "$TS_SOCK" ] && log "tailscaled сокет: OK" || { log "ERROR: tailscaled сокет не появился"; FAILED=1; }
 fi
 
-# --- 2. Подключение к tailnet (одноразовый auth key) ---------------------------
-TS_IP=""
-if [ -x "$TS_BIN" ]; then
-    if "$TS_BIN" status >/dev/null 2>&1; then
+# --- 2. Подключение к tailnet (одноразовый auth key, headless) -----------------
+if [ -x "$TS_CLI" ] && [ -S "$TS_SOCK" ]; then
+    if "$TS_CLI" --socket="$TS_SOCK" status >/dev/null 2>&1; then
         log "Tailscale уже в сети"
     else
         log "Подключение к tailnet по auth key..."
-        # up может ждать подтверждения VPN-конфигурации в GUI — не блокируемся
-        "$TS_BIN" up --authkey="$TS_AUTHKEY" ${TS_HOSTNAME:+--hostname="$TS_HOSTNAME"} \
-            >/dev/null 2>&1 &
+        "$TS_CLI" --socket="$TS_SOCK" up --authkey="$TS_AUTHKEY" \
+            ${TS_HOSTNAME:+--hostname="$TS_HOSTNAME"} >/dev/null 2>&1 &
         UP_PID=$!
         ( sleep 90; kill "$UP_PID" 2>/dev/null ) &
         KILLER_PID=$!
         wait "$UP_PID" 2>/dev/null
         kill "$KILLER_PID" 2>/dev/null
-        log "tailscale up завершён (rc=$?)"
     fi
     for i in $(seq 1 120); do
-        TS_IP=$("$TS_BIN" ip -4 2>/dev/null | head -1)
+        TS_IP=$("$TS_CLI" --socket="$TS_SOCK" ip -4 2>/dev/null | head -1)
         [ -n "$TS_IP" ] && break
         sleep 1
     done
     log "Tailscale IP: ${TS_IP:-НЕ ПОЛУЧЕН}"
-    [ -n "$TS_IP" ] || { log "ERROR: машина не получила tailnet IP (возможно, нужно подтверждение VPN в System Settings)"; FAILED=1; }
+    [ -n "$TS_IP" ] || { log "ERROR: машина не получила tailnet IP"; FAILED=1; }
 fi
 
 # --- 3. uv + Python + venv + пакет ----------------------------------------------
 UV_BIN=/usr/local/bin/uv
 if [ ! -x "$UV_BIN" ]; then
-    ARCH="$(uname -m)"
-    UV_TGZ="$PAYLOAD/installer/uv-$ARCH-apple-darwin.tar.gz"
+    # uv использует aarch64/x86_64, а не arm64/amd64 как tailscaled
+    case "$(uname -m)" in
+        arm64)  UV_ARCH=aarch64 ;;
+        x86_64) UV_ARCH=x86_64 ;;
+        *)      UV_ARCH="$(uname -m)" ;;
+    esac
+    UV_TGZ="$PAYLOAD/installer/uv-$UV_ARCH-apple-darwin.tar.gz"
     if [ -f "$UV_TGZ" ]; then
         log "Установка uv ($ARCH)..."
         rm -rf /tmp/uv-install && mkdir -p /tmp/uv-install
