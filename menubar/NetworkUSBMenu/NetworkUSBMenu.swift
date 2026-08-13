@@ -3,6 +3,16 @@ import Cocoa
 let CONFIG_PATH = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".config/usbmuxd-bridge/config.json")
 
+struct StoreConfig: Codable, Equatable {
+    var id: String?
+    var name: String
+    var host: String
+    var port: Int?
+    var token: String?
+
+    var effectivePort: Int { port ?? 8721 }
+}
+
 struct Config: Codable {
     var agent_host: String
     var agent_port: Int
@@ -15,6 +25,9 @@ struct Config: Codable {
     var report_dir: String
     var open_report: Bool?
     var auto_start: Bool?
+
+    var stores: [StoreConfig]?
+    var active_store_id: String?
 }
 
 @MainActor
@@ -24,8 +37,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var bridge: Process?
     var timer: Timer?
 
-    // menu item references we mutate each poll
+    // Submenu references
     var statusTitle: NSMenuItem!
+    var storeSubmenuItem: NSMenuItem!
+    var storeSubmenu: NSMenu!
     var deviceItem: NSMenuItem!
     var getInfoItem: NSMenuItem!
     var startItem: NSMenuItem!
@@ -35,16 +50,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var tunnelActive = false
     var reportRunning = false
     private var checkInFlight = false
+    private var currentStores: [StoreConfig] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadConfig()
+        ensureDefaultStores()
         buildMenu()
         refresh()
+
         if config?.auto_start == true {
             startBridge()
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+
+        // Poll status every 4 seconds
+        timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+
+        // Run initial Tailscale store discovery in background
+        Task {
+            await self.discoverTailscaleStores()
         }
     }
 
@@ -56,37 +81,224 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config = cfg
     }
 
+    func saveConfig() {
+        guard let cfg = config else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        if let data = try? encoder.encode(cfg) {
+            try? data.write(to: CONFIG_PATH)
+        }
+    }
+
+    func ensureDefaultStores() {
+        guard var cfg = config else { return }
+        var list = cfg.stores ?? []
+
+        // If list is empty, seed with current host & local VM defaults
+        if list.isEmpty {
+            let currentStore = StoreConfig(
+                id: "active_current",
+                name: "Текущий сервер (\(cfg.agent_host))",
+                host: cfg.agent_host,
+                port: cfg.agent_port,
+                token: cfg.token
+            )
+            let tartStore = StoreConfig(
+                id: "tart_vm",
+                name: "Локальная ВМ Tart (127.0.0.1)",
+                host: "127.0.0.1",
+                port: 8721,
+                token: cfg.token
+            )
+            list = [currentStore, tartStore]
+            cfg.stores = list
+            cfg.active_store_id = currentStore.id
+            self.config = cfg
+            saveConfig()
+        }
+        self.currentStores = list
+    }
+
     func buildMenu() {
         let m = NSMenu()
         statusTitle = NSMenuItem(title: "Tunnel: …", action: nil, keyEquivalent: "")
         statusTitle.isEnabled = false
         m.addItem(statusTitle)
+
+        // Store selector dropdown item
+        storeSubmenuItem = NSMenuItem(title: "📍 Выбор магазина…", action: nil, keyEquivalent: "")
+        storeSubmenu = NSMenu()
+        storeSubmenuItem.submenu = storeSubmenu
+        m.addItem(storeSubmenuItem)
+
+        m.addItem(.separator())
+
         deviceItem = NSMenuItem(title: "Device: —", action: nil, keyEquivalent: "")
         deviceItem.isEnabled = false
         m.addItem(deviceItem)
+
         m.addItem(.separator())
+
         getInfoItem = NSMenuItem(title: "Get Info…", action: #selector(getInfo), keyEquivalent: "i")
         getInfoItem.target = self
         getInfoItem.isEnabled = false
         m.addItem(getInfoItem)
+
         m.addItem(.separator())
+
         startItem = NSMenuItem(title: "Start bridge", action: #selector(startBridge), keyEquivalent: "s")
         startItem.target = self
         m.addItem(startItem)
+
         stopItem = NSMenuItem(title: "Stop bridge", action: #selector(stopBridge), keyEquivalent: "x")
         stopItem.target = self
         m.addItem(stopItem)
+
         logItem = NSMenuItem(title: "Open bridge log…", action: #selector(openLog), keyEquivalent: "l")
         logItem.target = self
         m.addItem(logItem)
+
         m.addItem(.separator())
+
         let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         m.addItem(quit)
+
         statusItem.menu = m
     }
 
-    // MARK: - Status
+    func rebuildStoreSubmenu() {
+        guard let cfg = config else { return }
+        storeSubmenu.removeAllItems()
+
+        let activeHost = cfg.agent_host
+        var activeName = activeHost
+
+        for (index, store) in currentStores.enumerated() {
+            let isSelected = (store.host == activeHost)
+            if isSelected {
+                activeName = store.name
+            }
+
+            let title = "\(isSelected ? "✓ " : "   ")\(store.name) (\(store.host):\(store.effectivePort))"
+            let item = NSMenuItem(title: title, action: #selector(selectStoreItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            storeSubmenu.addItem(item)
+        }
+
+        storeSubmenu.addItem(.separator())
+
+        let refreshItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale…", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
+        refreshItem.target = self
+        storeSubmenu.addItem(refreshItem)
+
+        storeSubmenuItem.title = "📍 Магазин: \(activeName)"
+    }
+
+    @objc func selectStoreItem(_ sender: NSMenuItem) {
+        let index = sender.tag
+        guard index >= 0 && index < currentStores.count else { return }
+        let selectedStore = currentStores[index]
+        switchToStore(selectedStore)
+    }
+
+    func switchToStore(_ store: StoreConfig) {
+        guard var cfg = config else { return }
+
+        // Stop current bridge if running
+        stopBridge()
+
+        cfg.agent_host = store.host
+        cfg.agent_port = store.effectivePort
+        if let t = store.token, !t.isEmpty {
+            cfg.token = t
+        }
+        cfg.active_store_id = store.id ?? store.host
+        self.config = cfg
+        saveConfig()
+
+        rebuildStoreSubmenu()
+
+        // Auto restart bridge for newly selected store
+        startBridge()
+    }
+
+    @objc func triggerTailscaleDiscovery() {
+        Task {
+            await discoverTailscaleStores()
+        }
+    }
+
+    func discoverTailscaleStores() async {
+        let peers = await Task.detached { () -> [StoreConfig] in
+            let paths = [
+                "/usr/local/bin/tailscale",
+                "/opt/homebrew/bin/tailscale",
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                "/usr/bin/tailscale"
+            ]
+            var binPath: String?
+            for p in paths {
+                if FileManager.default.fileExists(atPath: p) {
+                    binPath = p
+                    break
+                }
+            }
+            guard let bin = binPath else { return [] }
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: bin)
+            proc.arguments = ["status", "--json"]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = Pipe()
+            do { try proc.run() } catch { return [] }
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let peerMap = json["Peer"] as? [String: [String: Any]] else {
+                return []
+            }
+
+            var result: [StoreConfig] = []
+            for (_, peer) in peerMap {
+                let name = (peer["HostName"] as? String) ?? (peer["DNSName"] as? String) ?? "Unknown Shop"
+                let online = (peer["Online"] as? Bool) ?? false
+                guard online else { continue }
+                if let ips = peer["TailscaleIPs"] as? [String], let ip = ips.first {
+                    let cleanName = name.replacingOccurrences(of: ".tailnet.net.", with: "")
+                    result.append(StoreConfig(
+                        id: "ts_\(ip)",
+                        name: "🛍 \(cleanName)",
+                        host: ip,
+                        port: 8721,
+                        token: nil
+                    ))
+                }
+            }
+            return result
+        }.value
+
+        guard !peers.isEmpty else { return }
+
+        // Merge discovered peers into current stores
+        var updated = currentStores
+        for p in peers {
+            if !updated.contains(where: { $0.host == p.host }) {
+                updated.append(p)
+            }
+        }
+        self.currentStores = updated
+        if var cfg = config {
+            cfg.stores = updated
+            self.config = cfg
+            saveConfig()
+        }
+        rebuildStoreSubmenu()
+    }
+
+    // MARK: - Status & Refresh
 
     func refresh() {
         guard let cfg = config else {
@@ -94,6 +306,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusTitle.title = "Tunnel: no config"
             return
         }
+        rebuildStoreSubmenu()
+
         let running = bridgeRunning()
         let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
 
@@ -118,9 +332,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopItem.isHidden = !running
         logItem.isEnabled = FileManager.default.fileExists(atPath: cfg.log_path)
 
-        // Проверка устройств — только когда туннель поднят, и асинхронно:
-        // команда pymobiledevice3 уходит в фон, чтобы не блокировать главный
-        // поток (иначе выпадающее меню замирает и не открывается).
         if running && socket && !checkInFlight {
             checkInFlight = true
             let cfgCopy = cfg
@@ -153,9 +364,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridge?.isRunning ?? false
     }
 
-    /// Run the configured device list command off the main thread with a hard
-    /// timeout so a hung pymobiledevice3 (e.g. when the socket is stale) can
-    /// never freeze the menu.
     nonisolated static func queryDevices(_ cfg: Config) -> [[String: Any]] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cfg.device_cmd[0])
@@ -190,7 +398,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Actions
 
-    /// Run the iScan report (HTML generation) through the tunnel, then open it.
     @objc func getInfo() {
         guard let cfg = config, tunnelActive, !reportRunning else { return }
         reportRunning = true
@@ -228,7 +435,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// iscan prints "✓ Report saved: <path>" — return the path from the last line.
     nonisolated static func extractReportPath(from output: String) -> String? {
         for line in output.components(separatedBy: .newlines).reversed() {
             if let range = line.range(of: "Report saved: ") {
@@ -279,7 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openLog() {
         guard let cfg = config else { return }
-        NSWorkspace.shared.openFile(cfg.log_path)
+        NSWorkspace.shared.open(URL(fileURLWithPath: cfg.log_path))
     }
 
     @objc func quit() {

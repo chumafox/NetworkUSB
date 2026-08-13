@@ -141,21 +141,11 @@ if [ -x "$TS_CLI" ] && [ -S "$TS_SOCK" ]; then
         log "Tailscale уже в сети"
     else
         log "Подключение к tailnet по auth key..."
-        "$TS_CLI" --socket="$TS_SOCK" up --authkey="$TS_AUTHKEY" \
-            ${TS_HOSTNAME:+--hostname="$TS_HOSTNAME"} >/dev/null 2>&1 &
-        UP_PID=$!
-        ( sleep 90; kill "$UP_PID" 2>/dev/null ) &
-        KILLER_PID=$!
-        wait "$UP_PID" 2>/dev/null
-        kill "$KILLER_PID" 2>/dev/null
+        timeout 10 "$TS_CLI" --socket="$TS_SOCK" up --authkey="$TS_AUTHKEY" \
+            ${TS_HOSTNAME:+--hostname="$TS_HOSTNAME"} >/dev/null 2>&1 || true
     fi
-    for i in $(seq 1 120); do
-        TS_IP=$("$TS_CLI" --socket="$TS_SOCK" ip -4 2>/dev/null | head -1)
-        [ -n "$TS_IP" ] && break
-        sleep 1
-    done
-    log "Tailscale IP: ${TS_IP:-НЕ ПОЛУЧЕН}"
-    [ -n "$TS_IP" ] || { log "ERROR: машина не получила tailnet IP"; FAILED=1; }
+    TS_IP=$("$TS_CLI" --socket="$TS_SOCK" ip -4 2>/dev/null | head -1)
+    log "Tailscale IP: ${TS_IP:-НЕ ПОЛУЧЕН (настройка завершится, проверьте tailscale status)}"
 fi
 
 # --- 3. uv + Python + venv + пакет ----------------------------------------------
