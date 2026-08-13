@@ -123,9 +123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         var statusText: String
         if isScanning {
-            statusText = "Tunnel: сканирование сети…"
+            statusText = "Tunnel: scanning bridge…"
         } else if cfg.agent_host.isEmpty {
-            statusText = "Tunnel: no store selected"
+            statusText = "Tunnel: no server selected"
         } else if running && socket {
             statusText = currentDevices.isEmpty ? "Tunnel: no device" : "Tunnel: Connected (\(currentDevices.count))"
         } else if running {
@@ -138,20 +138,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.isEnabled = false
         menu.addItem(statusItem)
 
-        let activeStoreName = currentStores.first(where: { $0.host == cfg.agent_host })?.name ?? (cfg.agent_host.isEmpty ? "не выбран" : cfg.agent_host)
-        let activeStoreHeader = NSMenuItem(title: "📍 Магазин: \(activeStoreName)", action: nil, keyEquivalent: "")
-        activeStoreHeader.isEnabled = false
-        menu.addItem(activeStoreHeader)
-
         menu.addItem(.separator())
 
-        // Stores Section Header
-        let storesHeader = NSMenuItem(title: "🛍 СОХРАНЁННЫЕ МАГАЗИНЫ:", action: nil, keyEquivalent: "")
+        // SERVERS Section Header
+        let storesHeader = NSMenuItem(title: "SERVERS:", action: nil, keyEquivalent: "")
         storesHeader.isEnabled = false
         menu.addItem(storesHeader)
 
         if currentStores.isEmpty {
-            let emptyItem = NSMenuItem(title: "   (Список пуст)", action: nil, keyEquivalent: "")
+            let emptyItem = NSMenuItem(title: "   (No servers configured)", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
             menu.addItem(emptyItem)
         } else {
@@ -167,16 +162,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let addTartItem = NSMenuItem(title: "🖥 Подключить локальную ВМ Tart (127.0.0.1)", action: #selector(addTartVMStore), keyEquivalent: "")
-        addTartItem.target = self
-        menu.addItem(addTartItem)
+        // Only show "Connect Local Tart VM" if 127.0.0.1 / localhost is NOT yet in the SERVERS list
+        let hasTartVM = currentStores.contains(where: { $0.host == "127.0.0.1" || $0.host == "localhost" })
+        if !hasTartVM {
+            let addTartItem = NSMenuItem(title: "🖥 Connect Local Tart VM (127.0.0.1)", action: #selector(addTartVMStore), keyEquivalent: "")
+            addTartItem.target = self
+            menu.addItem(addTartItem)
+        }
 
         if isScanning {
-            let scanningItem = NSMenuItem(title: "⏳ Идёт сканирование сети…", action: nil, keyEquivalent: "")
+            let scanningItem = NSMenuItem(title: "⏳ Scanning bridge…", action: nil, keyEquivalent: "")
             scanningItem.isEnabled = false
             menu.addItem(scanningItem)
         } else {
-            let scanItem = NSMenuItem(title: "🔄 Сканировать сеть и ВМ", action: #selector(triggerStoreDiscovery), keyEquivalent: "r")
+            let scanItem = NSMenuItem(title: "Scan Bridge", action: #selector(triggerStoreDiscovery), keyEquivalent: "r")
             scanItem.target = self
             menu.addItem(scanItem)
         }
@@ -187,12 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(msgItem)
         }
 
-        let addItem = NSMenuItem(title: "➕ Добавить другой адрес (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
+        let addItem = NSMenuItem(title: "Add Server (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
         addItem.target = self
         menu.addItem(addItem)
 
         if !currentStores.isEmpty {
-            let clearItem = NSMenuItem(title: "🗑 Сбросить список магазинов", action: #selector(clearStoresList), keyEquivalent: "")
+            let clearItem = NSMenuItem(title: "Clear Servers", action: #selector(clearStoresList), keyEquivalent: "")
             clearItem.target = self
             menu.addItem(clearItem)
         }
@@ -233,14 +232,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
-    // MARK: - Store Actions
+    // MARK: - Store / Server Actions
 
     @objc func addTartVMStore() {
         let host = "127.0.0.1"
         let token = "0f1cead0241a2580faa848c351a82a5f1cef945573e8a059e3d5ceba6f6c22cb"
         let store = StoreConfig(
             id: "tart_vm",
-            name: "Локальная ВМ Tart",
+            name: "Local Tart VM",
             host: host,
             port: 8721,
             token: token
@@ -259,20 +258,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func promptAddCustomStore() {
         let alert = NSAlert()
-        alert.messageText = "Добавить магазин"
-        alert.informativeText = "Введите IP-адрес или имя хоста магазина (например: 100.x.y.z или 127.0.0.1):"
-        alert.addButton(withTitle: "Добавить")
-        alert.addButton(withTitle: "Отмена")
+        alert.messageText = "Add Server"
+        alert.informativeText = "Enter IP address or hostname of the remote server (e.g. 100.x.y.z or 127.0.0.1):"
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        input.placeholderString = "100.115.10.4 или 127.0.0.1"
+        input.placeholderString = "100.115.10.4 or 127.0.0.1"
         alert.accessoryView = input
 
         if alert.runModal() == .alertFirstButtonReturn {
             let host = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !host.isEmpty else { return }
 
-            let name = (host == "127.0.0.1" || host == "localhost") ? "Локальная ВМ Tart" : "Магазин (\(host))"
+            let name = (host == "127.0.0.1" || host == "localhost") ? "Local Tart VM" : "Server (\(host))"
             let store = StoreConfig(
                 id: "manual_\(host)",
                 name: name,
@@ -338,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func discoverStores(showDialog: Bool) async {
         isScanning = true
-        scanStatusMessage = "Сканирование…"
+        scanStatusMessage = "Scanning…"
         updateIcon()
 
         let (foundStores, infoMsg) = await Task.detached { () -> ([StoreConfig], String) in
@@ -362,7 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if connected {
                     discovered.append(StoreConfig(
                         id: "tart_vm_auto",
-                        name: "🖥 Локальная ВМ Tart",
+                        name: "Local Tart VM",
                         host: localhost,
                         port: 8721,
                         token: "0f1cead0241a2580faa848c351a82a5f1cef945573e8a059e3d5ceba6f6c22cb"
@@ -397,14 +396,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let peerMap = json["Peer"] as? [String: [String: Any]] {
                         for (_, peer) in peerMap {
-                            let name = (peer["HostName"] as? String) ?? (peer["DNSName"] as? String) ?? "Unknown Shop"
+                            let name = (peer["HostName"] as? String) ?? (peer["DNSName"] as? String) ?? "Unknown Server"
                             let online = (peer["Online"] as? Bool) ?? false
                             guard online else { continue }
                             if let ips = peer["TailscaleIPs"] as? [String], let ip = ips.first {
                                 let cleanName = name.replacingOccurrences(of: ".tailnet.net.", with: "")
                                 discovered.append(StoreConfig(
                                     id: "ts_\(ip)",
-                                    name: "🛍 \(cleanName)",
+                                    name: "Server (\(cleanName))",
                                     host: ip,
                                     port: 8721,
                                     token: nil
@@ -412,11 +411,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             }
                         }
                     } else {
-                        statusNote = "Tailscale не авторизван."
+                        statusNote = "Tailscale not authenticated."
                     }
                 }
             } else {
-                statusNote = "Tailscale CLI не найден."
+                statusNote = "Tailscale CLI not found."
             }
 
             return (discovered, statusNote)
@@ -453,9 +452,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let summaryText: String
         if !foundStores.isEmpty {
-            summaryText = "Обнаружено точек: \(foundStores.count) (\(foundStores.map(\.name).joined(separator: ", ")))"
+            summaryText = "Discovered servers: \(foundStores.count)"
         } else {
-            summaryText = "Активных узлов не найдено. \(infoMsg)"
+            summaryText = "No active servers found. \(infoMsg)"
         }
         self.scanStatusMessage = summaryText
         updateIcon()
@@ -463,11 +462,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if showDialog {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 let alert = NSAlert()
-                alert.messageText = "Результат сканирования"
+                alert.messageText = "Bridge Discovery Result"
                 if !foundStores.isEmpty {
-                    alert.informativeText = "Сканирование завершено успешно!\n\nОбнаружено активных точек: \(foundStores.count).\nДобавлено новых: \(newFoundCount)."
+                    alert.informativeText = "Scan completed successfully!\n\nDiscovered active servers: \(foundStores.count).\nAdded new servers: \(newFoundCount)."
                 } else {
-                    alert.informativeText = "Активных узлов не найдено.\n\(infoMsg)\n\nДля ручного ввода нажмите «➕ Добавить другой адрес»."
+                    alert.informativeText = "No active servers found.\n\(infoMsg)\n\nClick 'Add Server (IP / Host)…' to add a server manually."
                 }
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
@@ -516,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var label = "● NUSB"
         if isScanning {
             color = .systemBlue
-            label = "● NUSB (сканирование…)"
+            label = "● NUSB (scanning…)"
         } else if cfg.agent_host.isEmpty {
             color = .systemGray
         } else if running && socket {
