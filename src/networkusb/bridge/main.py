@@ -4,8 +4,9 @@ usbmuxd-bridge CLI entry point.
 Usage:
     usbmuxd-bridge --agent-host 192.168.1.10 --token SECRET [OPTIONS]
 
-After starting, set the env var in your diagnostic terminal:
-    export USBMUXD_SOCKET_ADDRESS=unix:/tmp/usbmuxd.sock
+After starting, set the env var in your diagnostic terminal
+(bare UNIX path — pymobiledevice3 / iScan treat "unix:" as HOST:PORT):
+    export USBMUXD_SOCKET_ADDRESS=/tmp/usbmuxd.sock
 
 Then run iScan normally:
     iscan report --open
@@ -75,7 +76,7 @@ def main(
             f"[cyan]Agent:[/cyan]  [white]{agent_host}:{agent_port}[/white]\n"
             f"[cyan]Socket:[/cyan] [white]{socket_path}[/white]\n\n"
             "[bold yellow]Run this in your diagnostic terminal:[/bold yellow]\n"
-            f"[bold white]export USBMUXD_SOCKET_ADDRESS=unix:{socket_path}[/bold white]\n\n"
+            f"[bold white]export USBMUXD_SOCKET_ADDRESS={socket_path}[/bold white]\n\n"
             "[dim]Bridge will reconnect automatically if the agent is temporarily unavailable.[/dim]",
             title="[cyan]🌉 NetworkUSB Bridge[/cyan]",
             border_style="cyan",

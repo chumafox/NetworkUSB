@@ -30,6 +30,8 @@ iPhone ── USB ── [usbmuxd-agent] ──TCP/TLS── [usbmuxd-bridge] �
 
 См. также: [chumafox/iScan — iOS device diagnostics](https://github.com/chumafox/iScan)
 
+Глубокий аудит ядра, инсталлера и контракта с iScan (находки P0–P3, дорожная карта): **[AUDIT.md](AUDIT.md)**. Открытые баги реализации по-прежнему ведутся в [PROBLEMS.md](PROBLEMS.md).
+
 ---
 
 ## Архитектура
@@ -49,7 +51,7 @@ graph LR
         unix_sock["/tmp/usbmuxd.sock"]
         iscan["iScan / pymobiledevice3"]
         bridge_cli -->|создаёт| unix_sock
-        unix_sock -->|USBMUXD_SOCKET_ADDRESS| iscan
+        unix_sock -->|USBMUXD_SOCKET_ADDRESS=/tmp/usbmuxd.sock| iscan
     end
 
     agent_srv <-->|"TCP+TLS :8721\nMux Protocol"| bridge_cli
@@ -140,13 +142,18 @@ usbmuxd-bridge --agent-host 192.168.1.10 --token mysecret
 
 Bridge выведет:
 ```
-export USBMUXD_SOCKET_ADDRESS=unix:/tmp/usbmuxd.sock
+export USBMUXD_SOCKET_ADDRESS=/tmp/usbmuxd.sock
 ```
+
+> **Формат адреса.** iScan / `pymobiledevice3` ждут **голый UNIX-путь**.
+> Префикс `unix:` — это диалект libusbmuxd; в pymobiledevice3 двоеточие
+> читается как `HOST:PORT` и ломает подключение. Меню-бар и `nusb`
+> выставляют путь без префикса.
 
 ### Запуск iScan
 
 ```bash
-export USBMUXD_SOCKET_ADDRESS=unix:/tmp/usbmuxd.sock
+export USBMUXD_SOCKET_ADDRESS=/tmp/usbmuxd.sock
 iscan report --open
 ```
 

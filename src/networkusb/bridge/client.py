@@ -248,7 +248,7 @@ class BridgeClient:
             pass
 
         logger.info(
-            "Local UNIX socket ready: %s  →  export USBMUXD_SOCKET_ADDRESS=unix:%s",
+            "Local UNIX socket ready: %s  →  export USBMUXD_SOCKET_ADDRESS=%s",
             self.socket_path,
             self.socket_path,
         )

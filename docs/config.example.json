@@ -1,0 +1,20 @@
+{
+  "agent_host": "100.64.0.12",
+  "agent_port": 8721,
+  "token": "REPLACE_WITH_TOKEN_OR_USE_TOKEN_FILE",
+  "bridge_bin": "/Users/YOU/NetworkUSB/.venv/bin/usbmuxd-bridge",
+  "socket_path": "/tmp/usbmuxd.sock",
+  "device_cmd": [
+    "/Users/YOU/iScan/.venv/bin/pymobiledevice3",
+    "usbmux",
+    "list"
+  ],
+  "log_path": "/Users/YOU/Library/Logs/networkusb-bridge.log",
+  "report_cmd": [
+    "/Users/YOU/iScan/.venv/bin/iscan",
+    "report"
+  ],
+  "report_dir": "/Users/YOU/iScan",
+  "open_report": true,
+  "auto_start": true
+}
