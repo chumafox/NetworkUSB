@@ -40,6 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     var tunnelActive = false
     var reportRunning = false
+    var isScanning = false
+
     private var checkInFlight = false
     private var currentStores: [StoreConfig] = []
     private var currentDevices: [[String: Any]] = []
@@ -119,7 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
 
         var statusText: String
-        if cfg.agent_host.isEmpty {
+        if isScanning {
+            statusText = "Tunnel: сканирование сети…"
+        } else if cfg.agent_host.isEmpty {
             statusText = "Tunnel: no store selected"
         } else if running && socket {
             statusText = currentDevices.isEmpty ? "Tunnel: no device" : "Tunnel: Connected (\(currentDevices.count))"
@@ -166,9 +170,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addTartItem.target = self
         menu.addItem(addTartItem)
 
-        let scanItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
-        scanItem.target = self
-        menu.addItem(scanItem)
+        if isScanning {
+            let scanningItem = NSMenuItem(title: "⏳ Идёт сканирование сети Tailscale…", action: nil, keyEquivalent: "")
+            scanningItem.isEnabled = false
+            menu.addItem(scanningItem)
+        } else {
+            let scanItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
+            scanItem.target = self
+            menu.addItem(scanItem)
+        }
 
         let addItem = NSMenuItem(title: "➕ Добавить другой адрес (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
         addItem.target = self
@@ -320,6 +330,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func discoverTailscaleStores(showDialog: Bool) async {
+        isScanning = true
+        updateIcon()
+
         let (peers, errorMsg) = await Task.detached { () -> ([StoreConfig], String?) in
             let paths = [
                 "/usr/local/bin/tailscale",
@@ -373,6 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return (result, nil)
         }.value
 
+        isScanning = false
+
         var newFoundCount = 0
         if !peers.isEmpty {
             var updated = currentStores
@@ -388,12 +403,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.config = cfg
                 saveConfig()
             }
-            updateIcon()
         }
+        updateIcon()
 
         if showDialog {
             let alert = NSAlert()
-            alert.messageText = "Сканирование сети Tailscale"
+            alert.messageText = "Результат сканирования сети"
             if let errorMsg {
                 alert.informativeText = "\(errorMsg)\n\nДля тестирования локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
             } else if newFoundCount > 0 {
@@ -446,7 +461,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
 
         var color: NSColor
-        if cfg.agent_host.isEmpty {
+        var label = "● NUSB"
+        if isScanning {
+            color = .systemBlue
+            label = "● NUSB (сканирование…)"
+        } else if cfg.agent_host.isEmpty {
             color = .systemGray
         } else if running && socket {
             color = currentDevices.isEmpty ? .systemOrange : .systemGreen
@@ -455,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             color = .systemGray
         }
-        setIcon(color: color, label: "● NUSB")
+        setIcon(color: color, label: label)
     }
 
     func setIcon(color: NSColor, label: String) {
