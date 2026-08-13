@@ -145,11 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         storesHeader.isEnabled = false
         menu.addItem(storesHeader)
 
-        if currentStores.isEmpty {
-            let emptyItem = NSMenuItem(title: "   (No servers discovered)", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-            menu.addItem(emptyItem)
-        } else {
+        if !currentStores.isEmpty {
             for (index, store) in currentStores.enumerated() {
                 let isSelected = (store.host == cfg.agent_host)
                 let title = "   \(isSelected ? "✓ " : "  ")\(store.host):\(store.effectivePort)"
