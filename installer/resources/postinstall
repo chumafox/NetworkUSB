@@ -42,6 +42,15 @@ run_check() { # run_check <имя> <сообщение_при_ошибке> <bas
     fi
 }
 
+run_warn_check() { # run_warn_check <имя> <сообщение_при_предупреждении> <bash-код проверки>
+    local name="$1" msg="$2" code="$3"
+    if bash -c "$code"; then
+        log "  [OK]   $name"
+    else
+        log "  [WARN] $name — $msg"
+    fi
+}
+
 run_check "macOS 13+ (Ventura)"        "слишком старая macOS" \
     '[[ $(sw_vers -productVersion | cut -d. -f1) -ge 13 ]]'
 run_check "Архитектура arm64/x86_64"   "неподдерживаемая архитектура" \
@@ -52,7 +61,7 @@ run_check "Интернет (pypi.org)"        "нужен доступ в ин�
     'curl -fsS --max-time 10 -o /dev/null https://pypi.org/pypi/typer/json'
 run_check "usbmuxd запущен (/var/run/usbmuxd)" "сервис usbmuxd не запущен" \
     'test -S /var/run/usbmuxd'
-run_check "iPhone по USB (ioreg)"      "подключи iPhone по USB и нажми «Доверять»" \
+run_warn_check "iPhone по USB (ioreg)"  "iPhone пока не подключен (можно подключить после установки)" \
     'ioreg -p IOUSB -l 2>/dev/null | grep -qi iphone'
 
 if [ "$FAILED" != 0 ]; then
