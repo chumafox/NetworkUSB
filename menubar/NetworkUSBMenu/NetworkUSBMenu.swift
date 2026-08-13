@@ -187,13 +187,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             storeSubmenu.addItem(item)
         }
 
-        storeSubmenu.addItem(.separator())
-
         let refreshItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale…", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
         refreshItem.target = self
         storeSubmenu.addItem(refreshItem)
 
+        let clearItem = NSMenuItem(title: "🗑 Сбросить список магазинов", action: #selector(clearStoresList), keyEquivalent: "")
+        clearItem.target = self
+        storeSubmenu.addItem(clearItem)
+
         storeSubmenuItem.title = "📍 Магазин: \(activeName)"
+    }
+
+    @objc func clearStoresList() {
+        guard var cfg = config else { return }
+        let defaultStore = StoreConfig(
+            id: "tart_vm",
+            name: "Локальная ВМ Tart (127.0.0.1)",
+            host: "127.0.0.1",
+            port: 8721,
+            token: cfg.token
+        )
+        currentStores = [defaultStore]
+        cfg.stores = currentStores
+        cfg.agent_host = defaultStore.host
+        cfg.agent_port = defaultStore.effectivePort
+        self.config = cfg
+        saveConfig()
+        rebuildStoreSubmenu()
+        switchToStore(defaultStore)
     }
 
     @objc func selectStoreItem(_ sender: NSMenuItem) {
