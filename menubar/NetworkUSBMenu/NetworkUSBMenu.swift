@@ -152,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             for (index, store) in currentStores.enumerated() {
                 let isSelected = (store.host == cfg.agent_host)
-                let title = "   \(isSelected ? "✓ " : "  ")\(store.name) (\(store.host):\(store.effectivePort))"
+                let title = "   \(isSelected ? "✓ " : "  ")\(store.host):\(store.effectivePort)"
                 let item = NSMenuItem(title: title, action: #selector(selectStoreItem(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = index
