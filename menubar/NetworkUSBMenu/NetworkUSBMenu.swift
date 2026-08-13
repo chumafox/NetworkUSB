@@ -237,7 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func addTartVMStore() {
         let host = "127.0.0.1"
-        let token = "08b0acd1336fb079606c9e378942050b0508583cc38102b5e96fadc12c3aaeed"
+        let token = "0f1cead0241a2580faa848c351a82a5f1cef945573e8a059e3d5ceba6f6c22cb"
         let store = StoreConfig(
             id: "tart_vm",
             name: "Локальная ВМ Tart",
@@ -365,7 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         name: "🖥 Локальная ВМ Tart",
                         host: localhost,
                         port: 8721,
-                        token: "08b0acd1336fb079606c9e378942050b0508583cc38102b5e96fadc12c3aaeed"
+                        token: "0f1cead0241a2580faa848c351a82a5f1cef945573e8a059e3d5ceba6f6c22cb"
                     ))
                 }
             }
