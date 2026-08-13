@@ -140,8 +140,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // SERVERS Section Header
-        let storesHeader = NSMenuItem(title: "SERVERS:", action: nil, keyEquivalent: "")
+        // Servers Section Header
+        let storesHeader = NSMenuItem(title: "Servers:", action: nil, keyEquivalent: "")
         storesHeader.isEnabled = false
         menu.addItem(storesHeader)
 
