@@ -285,11 +285,11 @@ mypy src/
 | 16 | iOS 17+ tunnel | `pymobiledevice3 remote start-tunnel` поверх NetworkUSB | ✅ не требуется |
 | 17 | LaunchDaemon | Проверить автозапуск через `launchctl` | 🔄 |
 
-> Проверено на реальном железе (2026-08-11): iPhone 12 mini (iPhone13,1, iOS 27.0)
+> Проверено на реальном железе: iPhone 12 mini (iPhone13,1, iOS 27.0)
 > физически на **Mac Pro** (агент `usbmuxd-agent`), **Mac Air** (мастер,
 > `usbmuxd-bridge`) читал его через TLS-туннель. `pymobiledevice3 usbmux list`,
 > `lockdown info` и `iscan info`/`iscan report` работают через `/tmp/usbmuxd.sock`.
-> Девайс: UDID `00008101-001110291410001E`, серийник FFWDK4JL0GPP.
+> Девайс: UDID `00008101-0000000000000000`, серийник `XXXXXXXXXXXX`.
 
 ### ⬜ Фаза 5 — Production-hardening (опционально)
 
