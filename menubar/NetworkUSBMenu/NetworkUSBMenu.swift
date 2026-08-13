@@ -172,11 +172,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(scanItem)
         }
 
-        if let msg = scanStatusMessage {
-            let msgItem = NSMenuItem(title: msg, action: nil, keyEquivalent: "")
-            msgItem.isEnabled = false
-            menu.addItem(msgItem)
-        }
 
         if !currentStores.isEmpty {
             let clearItem = NSMenuItem(title: "Clear Servers", action: #selector(clearStoresList), keyEquivalent: "")
