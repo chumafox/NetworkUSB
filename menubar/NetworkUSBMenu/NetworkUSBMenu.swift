@@ -60,9 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in self?.pollStatus() }
         }
 
-        // Auto discover stores in background if available
+        // Auto discover stores in background silently
         Task {
-            await self.discoverStores(showDialog: false)
+            await self.discoverStores()
         }
     }
 
@@ -146,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(storesHeader)
 
         if currentStores.isEmpty {
-            let emptyItem = NSMenuItem(title: "   (No servers configured)", action: nil, keyEquivalent: "")
+            let emptyItem = NSMenuItem(title: "   (No servers discovered)", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
             menu.addItem(emptyItem)
         } else {
@@ -161,14 +161,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-
-        // Only show "Connect Local Tart VM" if 127.0.0.1 / localhost is NOT yet in the SERVERS list
-        let hasTartVM = currentStores.contains(where: { $0.host == "127.0.0.1" || $0.host == "localhost" })
-        if !hasTartVM {
-            let addTartItem = NSMenuItem(title: "🖥 Connect Local Tart VM (127.0.0.1)", action: #selector(addTartVMStore), keyEquivalent: "")
-            addTartItem.target = self
-            menu.addItem(addTartItem)
-        }
 
         if isScanning {
             let scanningItem = NSMenuItem(title: "⏳ Scanning bridge…", action: nil, keyEquivalent: "")
@@ -185,10 +177,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             msgItem.isEnabled = false
             menu.addItem(msgItem)
         }
-
-        let addItem = NSMenuItem(title: "Add Server (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
-        addItem.target = self
-        menu.addItem(addItem)
 
         if !currentStores.isEmpty {
             let clearItem = NSMenuItem(title: "Clear Servers", action: #selector(clearStoresList), keyEquivalent: "")
@@ -234,64 +222,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Store / Server Actions
 
-    @objc func addTartVMStore() {
-        let host = "127.0.0.1"
-        let token = "0f1cead0241a2580faa848c351a82a5f1cef945573e8a059e3d5ceba6f6c22cb"
-        let store = StoreConfig(
-            id: "tart_vm",
-            name: "Local Tart VM",
-            host: host,
-            port: 8721,
-            token: token
-        )
-
-        if !currentStores.contains(where: { $0.host == host }) {
-            currentStores.append(store)
-            if var cfg = config {
-                cfg.stores = currentStores
-                self.config = cfg
-                saveConfig()
-            }
-        }
-        switchToStore(store)
-    }
-
-    @objc func promptAddCustomStore() {
-        let alert = NSAlert()
-        alert.messageText = "Add Server"
-        alert.informativeText = "Enter IP address or hostname of the remote server (e.g. 100.x.y.z or 127.0.0.1):"
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        input.placeholderString = "100.115.10.4 or 127.0.0.1"
-        alert.accessoryView = input
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            let host = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !host.isEmpty else { return }
-
-            let name = (host == "127.0.0.1" || host == "localhost") ? "Local Tart VM" : "Server (\(host))"
-            let store = StoreConfig(
-                id: "manual_\(host)",
-                name: name,
-                host: host,
-                port: 8721,
-                token: nil
-            )
-
-            if !currentStores.contains(where: { $0.host == host }) {
-                currentStores.append(store)
-                if var cfg = config {
-                    cfg.stores = currentStores
-                    self.config = cfg
-                    saveConfig()
-                }
-            }
-            switchToStore(store)
-        }
-    }
-
     @objc func selectStoreItem(_ sender: NSMenuItem) {
         let index = sender.tag
         guard index >= 0 && index < currentStores.count else { return }
@@ -331,16 +261,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func triggerStoreDiscovery() {
         Task {
-            await discoverStores(showDialog: true)
+            await discoverStores()
         }
     }
 
-    func discoverStores(showDialog: Bool) async {
+    func discoverStores() async {
         isScanning = true
         scanStatusMessage = "Scanning…"
         updateIcon()
 
-        let (foundStores, infoMsg) = await Task.detached { () -> ([StoreConfig], String) in
+        let (foundStores, _) = await Task.detached { () -> ([StoreConfig], String) in
             var discovered: [StoreConfig] = []
             var statusNote = ""
 
@@ -423,13 +353,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         isScanning = false
 
-        var newFoundCount = 0
         if !foundStores.isEmpty {
             var updated = currentStores
             for s in foundStores {
                 if !updated.contains(where: { $0.host == s.host }) {
                     updated.append(s)
-                    newFoundCount += 1
                 }
             }
             self.currentStores = updated
@@ -454,24 +382,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !foundStores.isEmpty {
             summaryText = "Discovered servers: \(foundStores.count)"
         } else {
-            summaryText = "No active servers found. \(infoMsg)"
+            summaryText = "No active servers found."
         }
         self.scanStatusMessage = summaryText
         updateIcon()
-
-        if showDialog {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                let alert = NSAlert()
-                alert.messageText = "Bridge Discovery Result"
-                if !foundStores.isEmpty {
-                    alert.informativeText = "Scan completed successfully!\n\nDiscovered active servers: \(foundStores.count).\nAdded new servers: \(newFoundCount)."
-                } else {
-                    alert.informativeText = "No active servers found.\n\(infoMsg)\n\nClick 'Add Server (IP / Host)…' to add a server manually."
-                }
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            }
-        }
     }
 
     // MARK: - Polling & Icon Status
