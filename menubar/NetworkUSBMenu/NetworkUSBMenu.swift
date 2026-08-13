@@ -58,16 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
         refresh()
 
-        if config?.auto_start == true {
-            startBridge()
-        }
-
         // Poll status every 4 seconds
         timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
 
-        // Run initial Tailscale store discovery in background
+        // Auto discover Tailscale stores in background if available
         Task {
             await self.discoverTailscaleStores()
         }
@@ -91,32 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func ensureDefaultStores() {
-        guard var cfg = config else { return }
-        var list = cfg.stores ?? []
-
-        // If list is empty, seed with current host & local VM defaults
-        if list.isEmpty {
-            let currentStore = StoreConfig(
-                id: "active_current",
-                name: "Текущий сервер (\(cfg.agent_host))",
-                host: cfg.agent_host,
-                port: cfg.agent_port,
-                token: cfg.token
-            )
-            let tartStore = StoreConfig(
-                id: "tart_vm",
-                name: "Локальная ВМ Tart (127.0.0.1)",
-                host: "127.0.0.1",
-                port: 8721,
-                token: cfg.token
-            )
-            list = [currentStore, tartStore]
-            cfg.stores = list
-            cfg.active_store_id = currentStore.id
-            self.config = cfg
-            saveConfig()
-        }
-        self.currentStores = list
+        guard let cfg = config else { return }
+        self.currentStores = cfg.stores ?? []
     }
 
     func buildMenu() {
@@ -172,49 +144,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         storeSubmenu.removeAllItems()
 
         let activeHost = cfg.agent_host
-        var activeName = activeHost
+        var activeName: String? = nil
 
-        for (index, store) in currentStores.enumerated() {
-            let isSelected = (store.host == activeHost)
-            if isSelected {
-                activeName = store.name
+        if currentStores.isEmpty {
+            let emptyItem = NSMenuItem(title: "(Нет сохраненных магазинов)", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            storeSubmenu.addItem(emptyItem)
+        } else {
+            for (index, store) in currentStores.enumerated() {
+                let isSelected = (store.host == activeHost)
+                if isSelected {
+                    activeName = store.name
+                }
+
+                let title = "\(isSelected ? "✓ " : "   ")\(store.name) (\(store.host):\(store.effectivePort))"
+                let item = NSMenuItem(title: title, action: #selector(selectStoreItem(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = index
+                storeSubmenu.addItem(item)
             }
-
-            let title = "\(isSelected ? "✓ " : "   ")\(store.name) (\(store.host):\(store.effectivePort))"
-            let item = NSMenuItem(title: title, action: #selector(selectStoreItem(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = index
-            storeSubmenu.addItem(item)
         }
+
+        storeSubmenu.addItem(.separator())
 
         let refreshItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale…", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
         refreshItem.target = self
         storeSubmenu.addItem(refreshItem)
 
-        let clearItem = NSMenuItem(title: "🗑 Сбросить список магазинов", action: #selector(clearStoresList), keyEquivalent: "")
-        clearItem.target = self
-        storeSubmenu.addItem(clearItem)
+        if !currentStores.isEmpty {
+            let clearItem = NSMenuItem(title: "🗑 Очистить список магазинов", action: #selector(clearStoresList), keyEquivalent: "")
+            clearItem.target = self
+            storeSubmenu.addItem(clearItem)
+        }
 
-        storeSubmenuItem.title = "📍 Магазин: \(activeName)"
+        if let activeName {
+            storeSubmenuItem.title = "📍 Магазин: \(activeName)"
+        } else {
+            storeSubmenuItem.title = "📍 Магазин: не выбран"
+        }
     }
 
     @objc func clearStoresList() {
         guard var cfg = config else { return }
-        let defaultStore = StoreConfig(
-            id: "tart_vm",
-            name: "Локальная ВМ Tart (127.0.0.1)",
-            host: "127.0.0.1",
-            port: 8721,
-            token: cfg.token
-        )
-        currentStores = [defaultStore]
-        cfg.stores = currentStores
-        cfg.agent_host = defaultStore.host
-        cfg.agent_port = defaultStore.effectivePort
+        currentStores = []
+        cfg.stores = []
+        cfg.agent_host = ""
+        cfg.active_store_id = nil
         self.config = cfg
         saveConfig()
+        stopBridge()
         rebuildStoreSubmenu()
-        switchToStore(defaultStore)
+        refresh()
     }
 
     @objc func selectStoreItem(_ sender: NSMenuItem) {
@@ -227,7 +207,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func switchToStore(_ store: StoreConfig) {
         guard var cfg = config else { return }
 
-        // Stop current bridge if running
         stopBridge()
 
         cfg.agent_host = store.host
@@ -240,8 +219,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         saveConfig()
 
         rebuildStoreSubmenu()
-
-        // Auto restart bridge for newly selected store
         startBridge()
     }
 
@@ -303,7 +280,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         guard !peers.isEmpty else { return }
 
-        // Merge discovered peers into current stores
         var updated = currentStores
         for p in peers {
             if !updated.contains(where: { $0.host == p.host }) {
@@ -334,7 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         var color: NSColor
         var status: String
-        if running && socket {
+        if cfg.agent_host.isEmpty {
+            color = .systemGray
+            status = "Tunnel: no store selected"
+        } else if running && socket {
             color = .systemOrange
             status = "Tunnel: no device"
         } else if running {
@@ -346,10 +325,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         setIcon(color: color, label: "● NUSB")
         statusTitle.title = status
-        deviceItem.title = "Device: …"
+        deviceItem.title = "Device: —"
         tunnelActive = false
         getInfoItem.isEnabled = false
-        startItem.isHidden = running
+        startItem.isHidden = running || cfg.agent_host.isEmpty
         stopItem.isHidden = !running
         logItem.isEnabled = FileManager.default.fileExists(atPath: cfg.log_path)
 
@@ -386,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     nonisolated static func queryDevices(_ cfg: Config) -> [[String: Any]] {
+        guard !cfg.socket_path.isEmpty else { return [] }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cfg.device_cmd[0])
         p.arguments = Array(cfg.device_cmd.dropFirst())
@@ -466,7 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func startBridge() {
-        guard let cfg = config, !bridgeRunning() else { return }
+        guard let cfg = config, !cfg.agent_host.isEmpty, !bridgeRunning() else { return }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cfg.bridge_bin)
         p.arguments = [
