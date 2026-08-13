@@ -109,7 +109,6 @@ else
     <key>ProgramArguments</key>
     <array>
         <string>$TS_BIN</string>
-        <string>--tun=userspace-networking</string>
         <string>--state=$TS_STATE</string>
         <string>--socket=$TS_SOCK</string>
     </array>

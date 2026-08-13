@@ -528,12 +528,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func startBridge() {
         guard let cfg = config, !cfg.agent_host.isEmpty, !bridgeRunning() else { return }
+
+        // Write token securely to ~/.config/usbmuxd-bridge/.token with 0600 permissions
+        let tokenFilePath = NSString(string: "~/.config/usbmuxd-bridge/.token").expandingTildeInPath
+        if let tokenData = cfg.token.data(using: .utf8) {
+            FileManager.default.createFile(atPath: tokenFilePath, contents: tokenData, attributes: [.posixPermissions: 0o600])
+        }
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cfg.bridge_bin)
         p.arguments = [
             "--agent-host", cfg.agent_host,
             "--agent-port", String(cfg.agent_port),
-            "--token", cfg.token,
+            "--token-file", tokenFilePath,
             "--log-level", "INFO",
         ]
         if !FileManager.default.fileExists(atPath: cfg.log_path) {

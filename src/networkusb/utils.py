@@ -135,3 +135,34 @@ def resolve_token(token: str | None, token_file: Path | None) -> str:
 
     raise ValueError("Either --token or --token-file must be provided.")
 
+
+def ensure_private_dir(path: Path, mode: int = 0o700) -> None:
+    """
+    Ensure directory exists with private permissions (default 0700).
+    """
+    path = path.expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(mode)
+    except OSError as e:
+        logging.warning("Could not set permissions %o on %s: %s", mode, path, e)
+
+
+def acquire_single_instance_lock(lock_path: Path):
+    """
+    Acquire a non-blocking file lock to enforce a single process instance.
+    Raises RuntimeError if another instance is already running.
+    """
+    import fcntl
+
+    lock_path = lock_path.expanduser().resolve()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_path, "a+")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, IOError):
+        f.close()
+        raise RuntimeError(f"Another instance is already running (lock file: {lock_path})")
+    return f
+
+
