@@ -84,6 +84,9 @@ NetworkUSB/
 ├── docs/
 │   └── CLIENT_INSTALLER.md        # инструкция: сборка, установка, диагностика
 │
+├── scripts/
+│   └── nusb                        # мастер: nusb {start|status|stop} — bridge + иконка меню-бара
+│
 └── tests/
     ├── test_protocol.py            # 15 unit tests — протокол
     ├── test_tls.py                 # 16 unit tests — TLS, cert, known_hosts

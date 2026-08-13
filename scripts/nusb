@@ -1,0 +1,87 @@
+#!/bin/bash
+# =============================================================================
+# nusb — единая команда для NetworkUSB на мастере (Mac Air)
+#
+# Поднимает bridge И иконку меню-бара одной командой. Меню-бар (NetworkUSBMenu)
+# является супервизором: он сам запускает и перезапускает bridge.
+#
+#   nusb start   — поднять иконку в меню-баре + bridge (+ туннель до агента)
+#   nusb status  — показать состояние: меню-бар, bridge, сокет, устройства
+#   nusb stop    — погасить bridge и иконку меню-бара
+# =============================================================================
+set -uo pipefail
+
+MENUBAR_APP="$HOME/Applications/NetworkUSBMenu.app"
+SOCKET=/tmp/usbmuxd.sock
+LOG="$HOME/Library/Logs/networkusb-bridge.log"
+CONFIG="$HOME/.config/usbmuxd-bridge/config.json"
+
+# pymobiledevice3 из конфига (для status)
+DEVICE_CMD=$(/usr/bin/python3 -c "import json,sys;print(json.load(open('$CONFIG'))['device_cmd'][0])" 2>/dev/null || echo "")
+
+cmd_start() {
+    if [ -d "$MENUBAR_APP" ]; then
+        echo "Запускаю NetworkUSBMenu (иконка в меню-баре + bridge)..."
+        open "$MENUBAR_APP"
+    else
+        echo "ERROR: $MENUBAR_APP не найден" >&2
+        exit 1
+    fi
+    # ждём появления сокета (bridge поднимает его после аутентификации с агентом)
+    for i in $(seq 1 45); do
+        [ -S "$SOCKET" ] && break
+        sleep 1
+    done
+    if [ -S "$SOCKET" ]; then
+        echo "OK: bridge поднят, сокет $SOCKET. Иконка в меню-баре."
+        # показать, что видит туннель
+        [ -n "$DEVICE_CMD" ] && USBMUXD_SOCKET_ADDRESS="$SOCKET" "$DEVICE_CMD" usbmux list 2>/dev/null | \
+            /usr/bin/python3 -c "import sys,json;
+try:
+  d=json.load(sys.stdin); print('Устройств: %d'%len(d));
+  [print('  -', x.get('DeviceName'), x.get('ProductType'), 'iOS', x.get('ProductVersion')) for x in d]
+except Exception: pass"
+    else
+        echo "ВНИМАНИЕ: сокет $SOCKET не появился за 45с — смотри лог: $LOG" >&2
+    fi
+}
+
+cmd_status() {
+    echo "== Меню-бар (NetworkUSBMenu) =="
+    pgrep -fl -i NetworkUSBMenu | grep -v grep | head -1 || echo "  не запущен"
+    echo "== Bridge (usbmuxd-bridge) =="
+    pgrep -fl usbmuxd-bridge | grep -v grep | head -1 || echo "  не запущен"
+    echo "== Сокет =="
+    if [ -S "$SOCKET" ]; then
+        echo "  $SOCKET — есть"
+        if [ -n "$DEVICE_CMD" ]; then
+            echo "== Устройства через туннель =="
+            USBMUXD_SOCKET_ADDRESS="$SOCKET" "$DEVICE_CMD" usbmux list 2>/dev/null | \
+            /usr/bin/python3 -c "import sys,json
+try:
+  d=json.load(sys.stdin)
+  if not d: print('  (нет устройств)')
+  [print('  -', x.get('DeviceName'), x.get('ProductType'), 'iOS', x.get('ProductVersion')) for x in d]
+except Exception as e: print('  (не удалось прочитать:', e, ')')"
+        fi
+    else
+        echo "  $SOCKET — НЕТ (туннель не поднят)"
+    fi
+}
+
+cmd_stop() {
+    echo "Останавливаю bridge и иконку меню-бара..."
+    pkill -f "usbmuxd-bridge --agent-host" 2>/dev/null
+    osascript -e 'tell application "NetworkUSBMenu" to quit' 2>/dev/null
+    pkill -f -i "NetworkUSBMenu.app/Contents/MacOS/NetworkUSBMenu" 2>/dev/null
+    sleep 1
+    rm -f "$SOCKET"
+    echo "Остановлено."
+}
+
+case "${1:-}" in
+    start)  cmd_start ;;
+    status) cmd_status ;;
+    stop)   cmd_stop ;;
+    *) echo "Использование: nusb {start|status|stop}"; exit 1 ;;
+esac
