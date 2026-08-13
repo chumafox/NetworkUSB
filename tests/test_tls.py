@@ -13,7 +13,6 @@ Tests cover:
 from __future__ import annotations
 
 import ssl
-from pathlib import Path
 
 import pytest
 
@@ -26,7 +25,6 @@ from networkusb.tls import (
     make_server_ssl_context,
     save_known_fingerprint,
 )
-
 
 # ---------------------------------------------------------------------------
 # Certificate generation
@@ -50,10 +48,10 @@ def test_generate_key_permissions(tmp_path):
 
 def test_generate_idempotent(tmp_path):
     """Calling twice returns the same cert content."""
-    cert1, key1 = generate_self_signed(tmp_path)
+    cert1, _key1 = generate_self_signed(tmp_path)
     content1 = cert1.read_bytes()
 
-    cert2, key2 = generate_self_signed(tmp_path)
+    cert2, _key2 = generate_self_signed(tmp_path)
     content2 = cert2.read_bytes()
 
     assert content1 == content2, "Should not regenerate when files already exist"

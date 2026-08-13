@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 from pathlib import Path
 
 import typer
@@ -89,9 +88,9 @@ def main(
     ),
 ) -> None:
     """Start the usbmuxd-agent server."""
-    from networkusb.utils import setup_logging, check_unix_socket_accessible
-    from networkusb.tls import generate_self_signed, get_fingerprint, make_server_ssl_context
     from networkusb.agent.server import AgentServer
+    from networkusb.tls import generate_self_signed, get_fingerprint, make_server_ssl_context
+    from networkusb.utils import setup_logging
 
     # ---- Logging ----
     log_file: Path | None = None
@@ -141,22 +140,11 @@ def main(
     )
 
     # ---- Resolve shared secret (--token-file > --token / USBMUXD_TOKEN) ----
-    if token_file is not None:
-        token_file = token_file.expanduser()
-        if not token_file.is_file():
-            console.print(f"[bold red]Token file not found:[/bold red] {token_file}")
-            raise typer.Exit(1)
-        resolved_token = token_file.read_text(encoding="utf-8").strip()
-        if not resolved_token:
-            console.print(f"[bold red]Token file is empty:[/bold red] {token_file}")
-            raise typer.Exit(1)
-    else:
-        resolved_token = token
-    if not resolved_token:
-        console.print(
-            "[bold red]No token provided.[/bold red]\n"
-            "Pass --token, set USBMUXD_TOKEN, or use --token-file."
-        )
+    from networkusb.utils import resolve_token
+    try:
+        resolved_token = resolve_token(token or None, token_file)
+    except ValueError as exc:
+        console.print(f"[bold red]Configuration error:[/bold red] {exc}")
         raise typer.Exit(1)
 
     server = AgentServer(

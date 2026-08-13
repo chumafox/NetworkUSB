@@ -260,7 +260,7 @@ class AgentServer:
                 await writer.drain()
 
         async def close_session(session_id: int) -> None:
-            session = sessions.pop(session_id, None)
+            session: UsbmuxdSession | None = sessions.pop(session_id, None)
             if session:
                 await session.close()
                 logger.debug("Closed usbmuxd session %d", session_id)

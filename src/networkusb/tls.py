@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import os
 import ssl
-from datetime import datetime, timedelta, timezone
+import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cryptography import x509
@@ -34,7 +36,7 @@ def generate_self_signed(cert_dir: Path) -> tuple[Path, Path]:
     Generate a self-signed RSA-2048 certificate + private key in *cert_dir*.
 
     If cert.pem and key.pem already exist in *cert_dir*, returns their paths
-    without regenerating (idempotent).
+    without regenerating (idempotent). Writes files atomically.
 
     Returns:
         (cert_path, key_path)
@@ -58,7 +60,7 @@ def generate_self_signed(cert_dir: Path) -> tuple[Path, Path]:
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NetworkUSB"),
         ]
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -84,16 +86,25 @@ def generate_self_signed(cert_dir: Path) -> tuple[Path, Path]:
         .sign(private_key, hashes.SHA256())
     )
 
-    # --- Write to disk ---
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(
-        private_key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
+    # --- Write to disk atomically ---
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
     )
-    key_path.chmod(0o600)  # owner read-only
+
+    with tempfile.NamedTemporaryFile("wb", dir=cert_dir, delete=False) as tf:
+        tf.write(cert_pem)
+        tmp_cert = tf.name
+
+    with tempfile.NamedTemporaryFile("wb", dir=cert_dir, delete=False) as tf:
+        tf.write(key_pem)
+        tmp_key = tf.name
+
+    os.chmod(tmp_key, 0o600)
+    os.replace(tmp_cert, cert_path)
+    os.replace(tmp_key, key_path)
 
     return cert_path, key_path
 
@@ -181,7 +192,7 @@ def load_known_fingerprint(host: str, port: int) -> str | None:
 
 def save_known_fingerprint(host: str, port: int, fingerprint: str) -> None:
     """
-    Persist *fingerprint* for *host:port* in the known_hosts file.
+    Persist *fingerprint* for *host:port* in the known_hosts file atomically.
 
     Replaces any existing entry for the same host:port.
     """
@@ -199,4 +210,11 @@ def save_known_fingerprint(host: str, port: int, fingerprint: str) -> None:
             lines.append(line)
 
     lines.append(f"{key} {fingerprint}")
-    known_hosts.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    content = "\n".join(lines) + "\n"
+
+    with tempfile.NamedTemporaryFile("w", dir=known_hosts.parent, delete=False, encoding="utf-8") as tf:
+        tf.write(content)
+        tmp_name = tf.name
+
+    os.replace(tmp_name, known_hosts)
+

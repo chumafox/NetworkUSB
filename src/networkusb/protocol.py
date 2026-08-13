@@ -56,6 +56,27 @@ async def read_frame(
     return msg_type, session_id, payload
 
 
+class SessionIdAllocator:
+    """
+    Allocates 32-bit unsigned session identifiers with safe wrap-around.
+    Session IDs start at 1 up to 0xFFFFFFFF (4,294,967,295).
+    """
+
+    def __init__(self, start: int = 1) -> None:
+        self._current = start & 0xFFFFFFFF or 1
+
+    def next_id(self, active_ids: set[int] | None = None) -> int:
+        """Return the next available 32-bit unsigned session ID."""
+        for _ in range(0xFFFFFFFF):
+            sid = self._current
+            self._current = (self._current + 1) & 0xFFFFFFFF
+            if self._current == 0:
+                self._current = 1
+            if active_ids is None or sid not in active_ids:
+                return sid
+        raise RuntimeError("No available session IDs in 32-bit space")
+
+
 def build_frame(
     msg_type: MsgType,
     session_id: int,
@@ -66,10 +87,13 @@ def build_frame(
 
     Args:
         msg_type:   One of MsgType enum values.
-        session_id: 32-bit unsigned session identifier.
+        session_id: 32-bit unsigned session identifier (0 .. 0xFFFFFFFF).
         payload:    Raw bytes to send (empty for control frames).
 
     Returns:
         Bytes ready to be written to a transport.
     """
+    if not (0 <= session_id <= 0xFFFFFFFF):
+        raise ValueError(f"session_id out of uint32 range: {session_id}")
     return struct.pack(">BII", int(msg_type), session_id, len(payload)) + payload
+

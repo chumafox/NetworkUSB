@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from pathlib import Path
 
 import typer
@@ -40,17 +39,33 @@ def main(
     agent_port: int = typer.Option(
         8721, "--agent-port", show_default=True, help="TCP port of the usbmuxd-agent"
     ),
-    token: str = typer.Option(
-        ...,
+    token: str | None = typer.Option(
+        None,
         "--token",
         envvar="USBMUXD_TOKEN",
         help="Shared secret — must match agent's --token",
+    ),
+    token_file: Path | None = typer.Option(
+        None,
+        "--token-file",
+        help="File containing shared secret token",
+    ),
+    expected_fingerprint: str | None = typer.Option(
+        None,
+        "--expected-fingerprint",
+        help="SHA-256 TLS fingerprint of expected agent certificate",
     ),
     socket_path: str = typer.Option(
         "/tmp/usbmuxd.sock",
         "--socket-path",
         show_default=True,
         help="Local UNIX socket path exposed to libimobiledevice",
+    ),
+    socket_mode: str = typer.Option(
+        "0700",
+        "--socket-mode",
+        show_default=True,
+        help="Permissions mode for local UNIX socket file (e.g. 0700 or 0777)",
     ),
     log_level: str = typer.Option(
         "INFO",
@@ -60,11 +75,23 @@ def main(
     ),
 ) -> None:
     """Start the usbmuxd-bridge and connect to the remote agent."""
-    from networkusb.utils import setup_logging
-    from networkusb.tls import make_client_ssl_context
     from networkusb.bridge.client import BridgeClient
+    from networkusb.tls import make_client_ssl_context
+    from networkusb.utils import resolve_token, setup_logging
 
     setup_logging(log_level)
+
+    try:
+        secret_token = resolve_token(token, token_file)
+    except ValueError as exc:
+        console.print(f"[bold red]Configuration error:[/bold red] {exc}")
+        raise typer.Exit(1)
+
+    try:
+        parsed_mode = int(socket_mode, 8)
+    except ValueError:
+        console.print(f"[bold red]Invalid socket mode:[/bold red] {socket_mode}")
+        raise typer.Exit(1)
 
     ssl_ctx = make_client_ssl_context()
 
@@ -73,7 +100,7 @@ def main(
         Panel(
             f"[bold cyan]usbmuxd-bridge[/bold cyan] v{_get_version()}\n\n"
             f"[cyan]Agent:[/cyan]  [white]{agent_host}:{agent_port}[/white]\n"
-            f"[cyan]Socket:[/cyan] [white]{socket_path}[/white]\n\n"
+            f"[cyan]Socket:[/cyan] [white]{socket_path}[/white] (mode {oct(parsed_mode)})\n\n"
             "[bold yellow]Run this in your diagnostic terminal:[/bold yellow]\n"
             f"[bold white]export USBMUXD_SOCKET_ADDRESS=unix:{socket_path}[/bold white]\n\n"
             "[dim]Bridge will reconnect automatically if the agent is temporarily unavailable.[/dim]",
@@ -86,9 +113,11 @@ def main(
     client = BridgeClient(
         agent_host=agent_host,
         agent_port=agent_port,
-        token=token,
+        token=secret_token,
         socket_path=socket_path,
         ssl_context=ssl_ctx,
+        expected_fingerprint=expected_fingerprint,
+        socket_mode=parsed_mode,
     )
 
     try:
@@ -98,6 +127,7 @@ def main(
     except Exception as exc:
         logger.critical("Bridge crashed: %s", exc, exc_info=True)
         raise typer.Exit(2)
+
 
 
 def _get_version() -> str:

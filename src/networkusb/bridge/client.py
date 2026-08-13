@@ -24,13 +24,13 @@ frames against reverse DATA would stall one-way transfers (AUDIT F-01).
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import os
 import ssl
+import time
 from pathlib import Path
 
-from networkusb.protocol import MsgType, build_frame, read_frame
+from networkusb.protocol import MsgType, SessionIdAllocator, build_frame, read_frame
 from networkusb.tls import (
     fingerprint_from_der,
     load_known_fingerprint,
@@ -61,15 +61,19 @@ class BridgeClient:
         token: str,
         socket_path: str,
         ssl_context: ssl.SSLContext,
+        expected_fingerprint: str | None = None,
+        socket_mode: int = 0o700,
     ) -> None:
         self.agent_host = agent_host
         self.agent_port = agent_port
         self.token = token
         self.socket_path = socket_path
         self.ssl_context = ssl_context
+        self.expected_fingerprint = expected_fingerprint
+        self.socket_mode = socket_mode
 
-        # Session counter — never reset, even across reconnects
-        self._session_counter: itertools.count[int] = itertools.count(1)
+        # Session ID allocator with uint32 wrap safety
+        self._session_allocator = SessionIdAllocator(1)
 
         # Active local client writers keyed by session_id
         self._local_clients: dict[int, asyncio.StreamWriter] = {}
@@ -96,6 +100,7 @@ class BridgeClient:
         """
         backoff = self._backoff_generator()
         while self._running:
+            start_time = time.monotonic()
             try:
                 await self._connect_and_serve()
             except asyncio.CancelledError:
@@ -106,6 +111,10 @@ class BridgeClient:
 
             if not self._running:
                 break
+
+            # If connection was sustained for > 5s, reset backoff delay
+            if time.monotonic() - start_time > 5.0:
+                backoff = self._backoff_generator()
 
             delay = next(backoff)
             logger.info("Reconnecting to agent in %.0f s...", delay)
@@ -142,7 +151,7 @@ class BridgeClient:
         )
         logger.debug("TCP+TLS handshake complete")
 
-        # ---- Certificate pinning ----
+        # ---- Certificate pinning & Fingerprint Verification (BEFORE AUTH) ----
         ssl_obj = writer.get_extra_info("ssl_object")
         if ssl_obj:
             await self._verify_fingerprint(ssl_obj)
@@ -191,8 +200,10 @@ class BridgeClient:
 
     async def _verify_fingerprint(self, ssl_obj: ssl.SSLObject) -> None:
         """
-        On first connect: save fingerprint to known_hosts.
-        On subsequent connects: verify it matches.
+        Verify agent certificate fingerprint BEFORE sending authentication token.
+
+        If expected_fingerprint is set, validates against it.
+        Otherwise checks known_hosts file (pinning on first connect).
 
         Raises ConnectionError if the fingerprint changed (possible MITM).
         """
@@ -201,6 +212,20 @@ class BridgeClient:
             raise ConnectionError("Agent sent no TLS certificate")
 
         fp = fingerprint_from_der(der)
+        self._last_fingerprint = fp
+        fp_norm = fp.replace(":", "").upper()
+
+        if self.expected_fingerprint:
+            expected_norm = self.expected_fingerprint.replace(":", "").upper()
+            if fp_norm != expected_norm:
+                raise ConnectionError(
+                    f"TLS fingerprint mismatch with --expected-fingerprint!\n"
+                    f"  Expected: {self.expected_fingerprint}\n"
+                    f"  Received: {fp}"
+                )
+            logger.info("Certificate fingerprint verified against --expected-fingerprint ✓")
+            return
+
         known = load_known_fingerprint(self.agent_host, self.agent_port)
 
         if known is None:
@@ -213,8 +238,7 @@ class BridgeClient:
             save_known_fingerprint(self.agent_host, self.agent_port, fp)
         else:
             known_normalised = known.upper().replace(":", "")
-            got_normalised = fp.replace(":", "")
-            if known_normalised != got_normalised:
+            if known_normalised != fp_norm:
                 raise ConnectionError(
                     f"TLS fingerprint MISMATCH for {self.agent_host}:{self.agent_port}!\n"
                     f"  Stored : {known}\n"
@@ -243,15 +267,55 @@ class BridgeClient:
             path=self.socket_path,
         )
         try:
-            os.chmod(self.socket_path, 0o777)
+            os.chmod(self.socket_path, self.socket_mode)
         except OSError:
             pass
 
+        self._write_active_metadata()
+
         logger.info(
-            "Local UNIX socket ready: %s  →  export USBMUXD_SOCKET_ADDRESS=unix:%s",
+            "Local UNIX socket ready (mode %o): %s  →  export USBMUXD_SOCKET_ADDRESS=unix:%s",
+            self.socket_mode,
             self.socket_path,
             self.socket_path,
         )
+
+    def _write_active_metadata(self) -> None:
+        """Write active.json metadata file for automatic discovery by iScan and status bars."""
+        import json
+        import tempfile
+        try:
+            from networkusb import __version__
+            version = __version__
+        except Exception:
+            version = "0.1.0"
+
+        active_file = Path.home() / ".cache" / "networkusb" / "active.json"
+        active_file.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "pid": os.getpid(),
+            "socket": f"unix:{self.socket_path}",
+            "agent_host": self.agent_host,
+            "agent_port": self.agent_port,
+            "fingerprint": self._last_fingerprint if hasattr(self, "_last_fingerprint") else "",
+            "version": version,
+        }
+        try:
+            with tempfile.NamedTemporaryFile("w", dir=active_file.parent, delete=False, encoding="utf-8") as tf:
+                json.dump(data, tf)
+                tmp_path = tf.name
+            os.replace(tmp_path, active_file)
+        except Exception as exc:
+            logger.debug("Could not write active metadata: %s", exc)
+
+    def _remove_active_metadata(self) -> None:
+        """Remove active.json metadata file on bridge teardown."""
+        active_file = Path.home() / ".cache" / "networkusb" / "active.json"
+        if active_file.exists():
+            try:
+                active_file.unlink()
+            except OSError:
+                pass
 
     async def _handle_local_client(
         self,
@@ -263,9 +327,10 @@ class BridgeClient:
 
         Creates a new session on the agent and relays bytes bidirectionally.
         """
-        session_id = next(self._session_counter)
+        session_id = self._session_allocator.next_id(set(self._local_clients.keys()))
         self._local_clients[session_id] = writer
         logger.debug("Local client → session %d", session_id)
+
 
         # Notify agent to open a usbmuxd connection
         try:
@@ -414,6 +479,8 @@ class BridgeClient:
                 os.unlink(self.socket_path)
             except OSError:
                 pass
+
+        self._remove_active_metadata()
 
         # Close all active local client connections
         n_clients = len(self._local_clients)

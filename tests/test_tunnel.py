@@ -175,7 +175,7 @@ async def build_bridge(
 async def test_basic_roundtrip(sock_dir, certs, patched_known_hosts):
     """Data sent by local client reaches mock usbmuxd and response comes back."""
     agent, agent_task, mock_server = await build_agent(sock_dir, certs)
-    bridge, bridge_task, bridge_sock = await build_bridge(
+    _bridge, bridge_task, bridge_sock = await build_bridge(
         sock_dir, agent, certs, patched_known_hosts
     )
 
@@ -197,7 +197,7 @@ async def test_basic_roundtrip(sock_dir, certs, patched_known_hosts):
 async def test_multiple_sequential_sessions(sock_dir, certs, patched_known_hosts):
     """Multiple sequential local-client connections all get correct responses."""
     agent, agent_task, mock_server = await build_agent(sock_dir, certs)
-    bridge, bridge_task, bridge_sock = await build_bridge(
+    _bridge, bridge_task, bridge_sock = await build_bridge(
         sock_dir, agent, certs, patched_known_hosts
     )
 
@@ -263,7 +263,7 @@ async def test_bridge_reconnects_after_agent_restart(
     Reduced wait times for CI — real reconnect delay is 1 s min.
     """
     agent, agent_task, mock_server = await build_agent(sock_dir, certs)
-    bridge, bridge_task, bridge_sock = await build_bridge(
+    _bridge, bridge_task, bridge_sock = await build_bridge(
         sock_dir, agent, certs, patched_known_hosts
     )
 
