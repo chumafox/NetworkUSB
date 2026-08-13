@@ -60,9 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in self?.pollStatus() }
         }
 
-        // Auto discover Tailscale stores in background if available
+        // Auto discover stores in background if available
         Task {
-            await self.discoverTailscaleStores(showDialog: false)
+            await self.discoverStores(showDialog: false)
         }
     }
 
@@ -172,11 +172,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(addTartItem)
 
         if isScanning {
-            let scanningItem = NSMenuItem(title: "⏳ Идёт сканирование сети Tailscale…", action: nil, keyEquivalent: "")
+            let scanningItem = NSMenuItem(title: "⏳ Идёт сканирование сети…", action: nil, keyEquivalent: "")
             scanningItem.isEnabled = false
             menu.addItem(scanningItem)
         } else {
-            let scanItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
+            let scanItem = NSMenuItem(title: "🔄 Сканировать сеть и ВМ", action: #selector(triggerStoreDiscovery), keyEquivalent: "r")
             scanItem.target = self
             menu.addItem(scanItem)
         }
@@ -330,21 +330,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateIcon()
     }
 
-    @objc func triggerTailscaleDiscovery() {
+    @objc func triggerStoreDiscovery() {
         Task {
-            await discoverTailscaleStores(showDialog: true)
+            await discoverStores(showDialog: true)
         }
     }
 
-    func discoverTailscaleStores(showDialog: Bool) async {
+    func discoverStores(showDialog: Bool) async {
         isScanning = true
         scanStatusMessage = "Сканирование…"
         updateIcon()
 
-        let (peers, errorMsg) = await Task.detached { () -> ([StoreConfig], String?) in
+        let (foundStores, infoMsg) = await Task.detached { () -> ([StoreConfig], String) in
+            var discovered: [StoreConfig] = []
+            var statusNote = ""
+
+            // 1. Check local Tart VM / Port 8721 readiness
+            let localhost = "127.0.0.1"
+            let socket = socket(AF_INET, SOCK_STREAM, 0)
+            if socket >= 0 {
+                var addr = sockaddr_in()
+                addr.sin_family = sa_family_t(AF_INET)
+                addr.sin_port = in_port_t(8721).bigEndian
+                inet_pton(AF_INET, localhost, &addr.sin_addr)
+                let connected = withUnsafePointer(to: &addr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        connect(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+                    }
+                }
+                close(socket)
+                if connected {
+                    discovered.append(StoreConfig(
+                        id: "tart_vm_auto",
+                        name: "🖥 Локальная ВМ Tart",
+                        host: localhost,
+                        port: 8721,
+                        token: "08b0acd1336fb079606c9e378942050b0508583cc38102b5e96fadc12c3aaeed"
+                    ))
+                }
+            }
+
+            // 2. Discover Tailscale peers
             let paths = [
-                "/usr/local/bin/tailscale",
                 "/opt/homebrew/bin/tailscale",
+                "/usr/local/bin/tailscale",
                 "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
                 "/usr/bin/tailscale"
             ]
@@ -355,73 +384,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     break
                 }
             }
-            guard let bin = binPath else {
-                return ([], "Tailscale CLI не найден в системе.")
-            }
 
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: bin)
-            proc.arguments = ["status", "--json"]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = Pipe()
-            do { try proc.run() } catch {
-                return ([], "Не удалось запустить tailscale status.")
-            }
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let peerMap = json["Peer"] as? [String: [String: Any]] else {
-                return ([], "Tailscale не подключен или сеть пуста.")
-            }
-
-            var result: [StoreConfig] = []
-            for (_, peer) in peerMap {
-                let name = (peer["HostName"] as? String) ?? (peer["DNSName"] as? String) ?? "Unknown Shop"
-                let online = (peer["Online"] as? Bool) ?? false
-                guard online else { continue }
-                if let ips = peer["TailscaleIPs"] as? [String], let ip = ips.first {
-                    let cleanName = name.replacingOccurrences(of: ".tailnet.net.", with: "")
-                    result.append(StoreConfig(
-                        id: "ts_\(ip)",
-                        name: "🛍 \(cleanName)",
-                        host: ip,
-                        port: 8721,
-                        token: nil
-                    ))
+            if let bin = binPath {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: bin)
+                proc.arguments = ["status", "--json"]
+                let pipe = Pipe()
+                proc.standardOutput = pipe
+                proc.standardError = Pipe()
+                if (try? proc.run()) != nil {
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let peerMap = json["Peer"] as? [String: [String: Any]] {
+                        for (_, peer) in peerMap {
+                            let name = (peer["HostName"] as? String) ?? (peer["DNSName"] as? String) ?? "Unknown Shop"
+                            let online = (peer["Online"] as? Bool) ?? false
+                            guard online else { continue }
+                            if let ips = peer["TailscaleIPs"] as? [String], let ip = ips.first {
+                                let cleanName = name.replacingOccurrences(of: ".tailnet.net.", with: "")
+                                discovered.append(StoreConfig(
+                                    id: "ts_\(ip)",
+                                    name: "🛍 \(cleanName)",
+                                    host: ip,
+                                    port: 8721,
+                                    token: nil
+                                ))
+                            }
+                        }
+                    } else {
+                        statusNote = "Tailscale не авторизван."
+                    }
                 }
+            } else {
+                statusNote = "Tailscale CLI не найден."
             }
-            return (result, nil)
+
+            return (discovered, statusNote)
         }.value
 
         isScanning = false
 
         var newFoundCount = 0
-        if !peers.isEmpty {
+        if !foundStores.isEmpty {
             var updated = currentStores
-            for p in peers {
-                if !updated.contains(where: { $0.host == p.host }) {
-                    updated.append(p)
+            for s in foundStores {
+                if !updated.contains(where: { $0.host == s.host }) {
+                    updated.append(s)
                     newFoundCount += 1
                 }
             }
             self.currentStores = updated
             if var cfg = config {
                 cfg.stores = updated
+                // Auto activate first discovered store if none currently active
+                if cfg.agent_host.isEmpty, let first = foundStores.first {
+                    cfg.agent_host = first.host
+                    cfg.agent_port = first.effectivePort
+                    if let t = first.token { cfg.token = t }
+                    cfg.active_store_id = first.id
+                }
                 self.config = cfg
                 saveConfig()
+            }
+            if let activeStore = foundStores.first, config?.agent_host == activeStore.host {
+                switchToStore(activeStore)
             }
         }
 
         let summaryText: String
-        if let errorMsg {
-            summaryText = errorMsg
-        } else if newFoundCount > 0 {
-            summaryText = "Найдено новых магазинов: \(newFoundCount)"
-        } else if !peers.isEmpty {
-            summaryText = "Все магазины (\(peers.count)) уже в списке"
+        if !foundStores.isEmpty {
+            summaryText = "Обнаружено точек: \(foundStores.count) (\(foundStores.map(\.name).joined(separator: ", ")))"
         } else {
-            summaryText = "Активных магазинов в Tailscale не найдено"
+            summaryText = "Активных узлов не найдено. \(infoMsg)"
         }
         self.scanStatusMessage = summaryText
         updateIcon()
@@ -429,15 +463,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if showDialog {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 let alert = NSAlert()
-                alert.messageText = "Результат сканирования сети"
-                if let errorMsg {
-                    alert.informativeText = "\(errorMsg)\n\nДля подключения локальной ВМ нажмите в меню «Подключить локальную ВМ Tart (127.0.0.1)»."
-                } else if newFoundCount > 0 {
-                    alert.informativeText = "Сканирование завершено! Добавлено новых магазинов: \(newFoundCount)."
-                } else if !peers.isEmpty {
-                    alert.informativeText = "Сканирование завершено! Все найденные магазины (\(peers.count)) уже есть в вашем списке."
+                alert.messageText = "Результат сканирования"
+                if !foundStores.isEmpty {
+                    alert.informativeText = "Сканирование завершено успешно!\n\nОбнаружено активных точек: \(foundStores.count).\nДобавлено новых: \(newFoundCount)."
                 } else {
-                    alert.informativeText = "В вашей сети Tailscale пока нет активных магазинов.\n\nДля подключения локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
+                    alert.informativeText = "Активных узлов не найдено.\n\(infoMsg)\n\nДля ручного ввода нажмите «➕ Добавить другой адрес»."
                 }
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
