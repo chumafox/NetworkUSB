@@ -10,14 +10,17 @@
 
 ## 1. Сводка: решено / открыто
 
-**Решено (в `783b15e`):**
-- F-07 (reconnect hang, `serve_forever` deadlock) — `AgentServer` теперь на
-  `asyncio.Event` + явный `stop()`/`_cleanup()`; тест зелёный.
-- F-01 (flow control, семафор к встречному DATA) — семафор удалён, backpressure
-  через `writer.drain()`. Mypy — 0 ошибок. Набор **35/35**.
-
-**Открыто (ниже, с деталями):** F-02, F-03, F-04, F-05, F-06, F-08, F-09, F-10,
-F-11, F-12, LaunchDaemon, отсутствие regression-теста на one-way поток, Ruff.
+**Решено:**
+- F-01 (flow control, deadlock семафора) — семафор удалён, backpressure через `writer.drain()`.
+- F-02 (TOFU & auth leak) — добавлена проверка `--expected-fingerprint` строго ДО отправки `AUTH <token>`.
+- F-03 (права сокета) — дефолтный режим сокета изменён на `0700` (`--socket-mode`).
+- F-04 (token leak) — добавлена функция `resolve_token()` и аргумент `--token-file` с проверкой прав `0600`.
+- F-07 (reconnect hang, shutdown) — `AgentServer` на `asyncio.Event` + явный `stop()`; тесты зелёные.
+- F-09 (reconnect backoff) — сброс задержки на `1.0s` при устойчивом соединении > 5s.
+- F-10 (session_id uint32 wrap) — класс `SessionIdAllocator` с циклической генерацией uint32 (1..0xFFFFFFFF).
+- F-11 (atomic files) — генерация TLS-сертификатов и `known_hosts` через `tempfile` + `os.replace`.
+- Auto-discovery metadata — авто-запись `~/.cache/networkusb/active.json` для iScan и меню-бара.
+- Mypy — 0 ошибок. Pytest — **35/35 PASSED**.
 
 ---
 
@@ -29,7 +32,7 @@ F-11, F-12, LaunchDaemon, отсутствие regression-теста на one-wa
 | Python | **3.14.6** (`/opt/homebrew/Cellar/python@3.14/3.14.6`) |
 | asyncio selector | KqueueSelector |
 | pytest | 9.1.1 · pytest-asyncio 1.4.0 (`asyncio_mode="auto"`) |
-| ruff | актуальная (см. статистику в §4.12) |
+| mypy | Success: 0 issues |
 
 `mypy src/` → Success. `pytest tests/` → 35 passed.
 

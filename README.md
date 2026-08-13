@@ -203,11 +203,14 @@ sudo rm /Library/LaunchDaemons/com.usbmuxd.agent.plist
 |----------|---------|----------|
 | `--agent-host` | — | Хост агента (обязательный) |
 | `--agent-port` | `8721` | Порт агента |
-| `--token` | — | Токен аутентификации (обязательный) |
+| `--token` | — | Токен аутентификации (если не передан `--token-file`) |
+| `--token-file` | — | Путь к файлу секрета (рекомендуется 0600) |
+| `--expected-fingerprint` | — | SHA-256 TLS fingerprint агента для строгой валидации до AUTH |
 | `--socket-path` | `/tmp/usbmuxd.sock` | Локальный UNIX-сокет для libimobiledevice |
+| `--socket-mode` | `0700` | Права доступа к созданному сокету (например `0700` или `0777`) |
 | `--log-level` | `INFO` | DEBUG / INFO / WARNING / ERROR |
 
-Оба параметра `--token` читаются также из переменной окружения `USBMUXD_TOKEN`.
+Оба параметра `--token` читаются также из переменной окружения `USBMUXD_TOKEN`. При создании туннеля bridge автоматически записывает метаданные в `~/.cache/networkusb/active.json` для мгновенного автообнаружения утилитой iScan и статус-барами.
 
 ---
 
