@@ -163,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         if isScanning {
-            let scanningItem = NSMenuItem(title: "⏳ Scanning bridge…", action: nil, keyEquivalent: "")
+            let scanningItem = NSMenuItem(title: "Scanning bridge…", action: nil, keyEquivalent: "")
             scanningItem.isEnabled = false
             menu.addItem(scanningItem)
         } else {
@@ -173,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         if let msg = scanStatusMessage {
-            let msgItem = NSMenuItem(title: "ℹ️ \(msg)", action: nil, keyEquivalent: "")
+            let msgItem = NSMenuItem(title: msg, action: nil, keyEquivalent: "")
             msgItem.isEnabled = false
             menu.addItem(msgItem)
         }
@@ -380,9 +380,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let summaryText: String
         if !foundStores.isEmpty {
-            summaryText = "Discovered servers: \(foundStores.count)"
+            summaryText = "Bridge: \(foundStores.count)"
         } else {
-            summaryText = "No active servers found."
+            summaryText = "Bridge: 0"
         }
         self.scanStatusMessage = summaryText
         updateIcon()
