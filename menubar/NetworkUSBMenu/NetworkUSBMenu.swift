@@ -31,8 +31,9 @@ struct Config: Codable {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    let mainMenu = NSMenu()
     var config: Config?
     var bridge: Process?
     var timer: Timer?
@@ -41,15 +42,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var reportRunning = false
     private var checkInFlight = false
     private var currentStores: [StoreConfig] = []
+    private var currentDevices: [[String: Any]] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        mainMenu.delegate = self
+        statusItem.menu = mainMenu
+
         loadConfig()
         ensureDefaultStores()
-        refresh()
+        updateIcon()
 
-        // Poll status every 4 seconds
+        // Background status polling loop every 4 seconds
         timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in self?.pollStatus() }
         }
 
         // Auto discover Tailscale stores in background if available
@@ -80,55 +85,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.currentStores = cfg.stores ?? []
     }
 
-    func refresh() {
+    // MARK: - NSMenuDelegate (Triggered instantly when user clicks the menu icon)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
         guard let cfg = config else {
-            setIcon(color: .systemGray, label: "● NUSB")
+            let item = NSMenuItem(title: "Tunnel: no config", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
             return
         }
 
         let running = bridgeRunning()
         let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
 
-        var color: NSColor
         var statusText: String
         if cfg.agent_host.isEmpty {
-            color = .systemGray
             statusText = "Tunnel: no store selected"
         } else if running && socket {
-            color = .systemOrange
-            statusText = "Tunnel: no device"
+            statusText = currentDevices.isEmpty ? "Tunnel: no device" : "Tunnel: Connected (\(currentDevices.count))"
         } else if running {
-            color = .systemYellow
             statusText = "Tunnel: connecting…"
         } else {
-            color = .systemGray
             statusText = "Tunnel: stopped"
         }
-        setIcon(color: color, label: "● NUSB")
 
-        // Build main menu items
-        let m = NSMenu()
-
-        let statusTitle = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-        statusTitle.isEnabled = false
-        m.addItem(statusTitle)
+        let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        statusItem.isEnabled = false
+        menu.addItem(statusItem)
 
         let activeStoreName = currentStores.first(where: { $0.host == cfg.agent_host })?.name ?? (cfg.agent_host.isEmpty ? "не выбран" : cfg.agent_host)
         let activeStoreHeader = NSMenuItem(title: "📍 Магазин: \(activeStoreName)", action: nil, keyEquivalent: "")
         activeStoreHeader.isEnabled = false
-        m.addItem(activeStoreHeader)
+        menu.addItem(activeStoreHeader)
 
-        m.addItem(.separator())
+        menu.addItem(.separator())
 
         // Stores Section Header
         let storesHeader = NSMenuItem(title: "🛍 СОХРАНЁННЫЕ МАГАЗИНЫ:", action: nil, keyEquivalent: "")
         storesHeader.isEnabled = false
-        m.addItem(storesHeader)
+        menu.addItem(storesHeader)
 
         if currentStores.isEmpty {
             let emptyItem = NSMenuItem(title: "   (Список пуст)", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
-            m.addItem(emptyItem)
+            menu.addItem(emptyItem)
         } else {
             for (index, store) in currentStores.enumerated() {
                 let isSelected = (store.host == cfg.agent_host)
@@ -136,63 +138,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let item = NSMenuItem(title: title, action: #selector(selectStoreItem(_:)), keyEquivalent: "")
                 item.target = self
                 item.tag = index
-                m.addItem(item)
+                menu.addItem(item)
             }
         }
 
-        m.addItem(.separator())
+        menu.addItem(.separator())
 
         let scanItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
         scanItem.target = self
-        m.addItem(scanItem)
+        menu.addItem(scanItem)
 
         let addItem = NSMenuItem(title: "➕ Добавить магазин (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
         addItem.target = self
-        m.addItem(addItem)
+        menu.addItem(addItem)
 
         if !currentStores.isEmpty {
             let clearItem = NSMenuItem(title: "🗑 Сбросить список магазинов", action: #selector(clearStoresList), keyEquivalent: "")
             clearItem.target = self
-            m.addItem(clearItem)
+            menu.addItem(clearItem)
         }
 
-        m.addItem(.separator())
+        menu.addItem(.separator())
 
-        let deviceItem = NSMenuItem(title: "Device: —", action: nil, keyEquivalent: "")
-        deviceItem.isEnabled = false
-        m.addItem(deviceItem)
+        let devLabel = deviceLabel(currentDevices)
+        let deviceMenuItem = NSMenuItem(title: devLabel, action: nil, keyEquivalent: "")
+        deviceMenuItem.isEnabled = false
+        menu.addItem(deviceMenuItem)
 
         let getInfoItem = NSMenuItem(title: "Get Info…", action: #selector(getInfo), keyEquivalent: "i")
         getInfoItem.target = self
         getInfoItem.isEnabled = tunnelActive && !reportRunning
-        m.addItem(getInfoItem)
+        menu.addItem(getInfoItem)
 
-        m.addItem(.separator())
+        menu.addItem(.separator())
 
         if !running && !cfg.agent_host.isEmpty {
             let startItem = NSMenuItem(title: "Start bridge", action: #selector(startBridge), keyEquivalent: "s")
             startItem.target = self
-            m.addItem(startItem)
+            menu.addItem(startItem)
         } else if running {
             let stopItem = NSMenuItem(title: "Stop bridge", action: #selector(stopBridge), keyEquivalent: "x")
             stopItem.target = self
-            m.addItem(stopItem)
+            menu.addItem(stopItem)
         }
 
         let logItem = NSMenuItem(title: "Open bridge log…", action: #selector(openLog), keyEquivalent: "l")
         logItem.target = self
         logItem.isEnabled = FileManager.default.fileExists(atPath: cfg.log_path)
-        m.addItem(logItem)
+        menu.addItem(logItem)
 
-        m.addItem(.separator())
+        menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
-        m.addItem(quitItem)
+        menu.addItem(quitItem)
+    }
 
-        statusItem.menu = m
+    // MARK: - Polling & Icon Status
 
-        // Background query devices if running
+    func pollStatus() {
+        guard let cfg = config else {
+            setIcon(color: .systemGray, label: "● NUSB")
+            return
+        }
+
+        updateIcon()
+
+        let running = bridgeRunning()
+        let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
+
         if running && socket && !checkInFlight {
             checkInFlight = true
             let cfgCopy = cfg
@@ -201,13 +215,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.checkInFlight = false
-                    guard self.bridgeRunning(),
-                          FileManager.default.fileExists(atPath: cfgCopy.socket_path) else { return }
+                    self.currentDevices = devices
                     self.tunnelActive = !devices.isEmpty
-                    self.setIcon(color: devices.isEmpty ? .systemOrange : .systemGreen, label: "● NUSB")
+                    self.updateIcon()
                 }
             }
         }
+    }
+
+    func updateIcon() {
+        guard let cfg = config else {
+            setIcon(color: .systemGray, label: "● NUSB")
+            return
+        }
+        let running = bridgeRunning()
+        let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
+
+        var color: NSColor
+        if cfg.agent_host.isEmpty {
+            color = .systemGray
+        } else if running && socket {
+            color = currentDevices.isEmpty ? .systemOrange : .systemGreen
+        } else if running {
+            color = .systemYellow
+        } else {
+            color = .systemGray
+        }
+        setIcon(color: color, label: "● NUSB")
     }
 
     @objc func promptAddCustomStore() {
@@ -267,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.config = cfg
         saveConfig()
 
-        refresh()
+        updateIcon()
         startBridge()
     }
 
@@ -280,7 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.config = cfg
         saveConfig()
         stopBridge()
-        refresh()
+        updateIcon()
     }
 
     @objc func triggerTailscaleDiscovery() {
@@ -353,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.config = cfg
             saveConfig()
         }
-        refresh()
+        updateIcon()
     }
 
     func setIcon(color: NSColor, label: String) {
@@ -394,6 +428,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return arr
     }
 
+    func deviceLabel(_ devices: [[String: Any]]) -> String {
+        if devices.isEmpty { return "Device: —" }
+        let name = devices[0]["DeviceName"] as? String ?? "iPhone"
+        let type = devices[0]["ProductType"] as? String ?? "?"
+        return "Device: \(name) · \(type)"
+    }
+
     // MARK: - Actions
 
     @objc func getInfo() {
@@ -418,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 self.reportRunning = false
-                self.refresh()
+                self.updateIcon()
                 if let saved, self.config?.open_report == true {
                     NSWorkspace.shared.open(URL(fileURLWithPath: saved))
                 }
@@ -428,7 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try p.run()
         } catch {
             reportRunning = false
-            refresh()
+            updateIcon()
         }
     }
 
@@ -462,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.terminationHandler = { [weak self] _ in
             Task { @MainActor in
                 self?.bridge = nil
-                self?.refresh()
+                self?.updateIcon()
             }
         }
         do {
@@ -471,13 +512,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             print("failed to start bridge: \(error)")
         }
-        refresh()
+        updateIcon()
     }
 
     @objc func stopBridge() {
         bridge?.terminate()
         bridge = nil
-        refresh()
+        updateIcon()
     }
 
     @objc func openLog() {
