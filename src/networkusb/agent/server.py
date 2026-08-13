@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import ssl
 import time
 from dataclasses import dataclass, field
@@ -225,8 +226,8 @@ class AgentServer:
             return
 
         auth_str = auth_line.decode("utf-8", errors="replace").rstrip("\r\n")
-        if not auth_str.startswith("AUTH ") or auth_str[5:] != self.token:
-            logger.warning("Auth failed from %s (got: %r)", peer, auth_str[:20])
+        if not auth_str.startswith("AUTH ") or not secrets.compare_digest(auth_str[5:], self.token):
+            logger.warning("Auth failed from %s", peer)
             try:
                 writer.write(b"FAIL\n")
                 await writer.drain()
@@ -257,7 +258,7 @@ class AgentServer:
             frame = build_frame(msg_type, session_id, payload)
             async with write_lock:
                 writer.write(frame)
-                await writer.drain()
+            await writer.drain()
 
         async def close_session(session_id: int) -> None:
             session: UsbmuxdSession | None = sessions.pop(session_id, None)

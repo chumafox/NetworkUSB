@@ -77,6 +77,7 @@ class BridgeClient:
 
         # Active local client writers keyed by session_id
         self._local_clients: dict[int, asyncio.StreamWriter] = {}
+        self._local_queues: dict[int, asyncio.Queue[bytes]] = {}
 
         # Agent TCP writer (None when disconnected)
         self._agent_writer: asyncio.StreamWriter | None = None
@@ -329,8 +330,6 @@ class BridgeClient:
         """
         session_id = self._session_allocator.next_id(set(self._local_clients.keys()))
         self._local_clients[session_id] = writer
-        logger.debug("Local client → session %d", session_id)
-
 
         # Notify agent to open a usbmuxd connection
         try:
@@ -341,11 +340,6 @@ class BridgeClient:
             self._local_clients.pop(session_id, None)
             return
 
-        # Relay local client bytes → agent.
-        # Backpressure is provided by writer.drain() (transport-level), not a
-        # frame-counting semaphore — a byte tunnel's traffic is not symmetric,
-        # so counting in-flight DATA frames against reverse DATA would stall
-        # after 100 one-way chunks (see AUDIT F-01).
         try:
             while True:
                 data = await reader.read(CHUNK_SIZE)
@@ -355,8 +349,6 @@ class BridgeClient:
                 await self._send_frame(MsgType.DATA, session_id, data)
 
         except asyncio.CancelledError:
-            # Do NOT swallow cancellation: let it propagate so the task is
-            # properly torn down (cleanup below still runs via finally).
             raise
         except (ConnectionResetError, BrokenPipeError):
             pass
@@ -450,7 +442,7 @@ class BridgeClient:
         frame = build_frame(msg_type, session_id, payload)
         async with self._write_lock:
             self._agent_writer.write(frame)
-            await self._agent_writer.drain()
+        await self._agent_writer.drain()
 
     # ------------------------------------------------------------------
     # Teardown
@@ -490,6 +482,7 @@ class BridgeClient:
             except Exception:
                 pass
         self._local_clients.clear()
+        self._local_queues.clear()
         if n_clients:
             logger.info("Closed %d local client(s)", n_clients)
 

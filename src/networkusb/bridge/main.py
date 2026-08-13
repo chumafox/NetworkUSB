@@ -102,7 +102,7 @@ def main(
             f"[cyan]Agent:[/cyan]  [white]{agent_host}:{agent_port}[/white]\n"
             f"[cyan]Socket:[/cyan] [white]{socket_path}[/white] (mode {oct(parsed_mode)})\n\n"
             "[bold yellow]Run this in your diagnostic terminal:[/bold yellow]\n"
-            f"[bold white]export USBMUXD_SOCKET_ADDRESS=unix:{socket_path}[/bold white]\n\n"
+            f"[bold white]export USBMUXD_SOCKET_ADDRESS={socket_path}[/bold white]\n\n"
             "[dim]Bridge will reconnect automatically if the agent is temporarily unavailable.[/dim]",
             title="[cyan]🌉 NetworkUSB Bridge[/cyan]",
             border_style="cyan",
