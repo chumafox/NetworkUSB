@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Auto discover Tailscale stores in background if available
         Task {
-            await self.discoverTailscaleStores()
+            await self.discoverTailscaleStores(showDialog: false)
         }
     }
 
@@ -162,11 +162,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let addTartItem = NSMenuItem(title: "🖥 Подключить локальную ВМ Tart (127.0.0.1)", action: #selector(addTartVMStore), keyEquivalent: "")
+        addTartItem.target = self
+        menu.addItem(addTartItem)
+
         let scanItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
         scanItem.target = self
         menu.addItem(scanItem)
 
-        let addItem = NSMenuItem(title: "➕ Добавить магазин (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
+        let addItem = NSMenuItem(title: "➕ Добавить другой адрес (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
         addItem.target = self
         menu.addItem(addItem)
 
@@ -212,65 +216,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
-    // MARK: - Polling & Icon Status
+    // MARK: - Store Actions
 
-    func pollStatus() {
-        guard let cfg = config else {
-            setIcon(color: .systemGray, label: "● NUSB")
-            return
-        }
+    @objc func addTartVMStore() {
+        let host = "127.0.0.1"
+        let token = "08b0acd1336fb079606c9e378942050b0508583cc38102b5e96fadc12c3aaeed"
+        let store = StoreConfig(
+            id: "tart_vm",
+            name: "Локальная ВМ Tart",
+            host: host,
+            port: 8721,
+            token: token
+        )
 
-        updateIcon()
-
-        let running = bridgeRunning()
-        let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
-
-        if running && socket && !checkInFlight {
-            checkInFlight = true
-            let cfgCopy = cfg
-            Task.detached { [weak self] in
-                let devices = Self.queryDevices(cfgCopy)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.checkInFlight = false
-                    self.currentDevices = devices
-                    self.tunnelActive = !devices.isEmpty
-                    self.updateIcon()
-                }
+        if !currentStores.contains(where: { $0.host == host }) {
+            currentStores.append(store)
+            if var cfg = config {
+                cfg.stores = currentStores
+                self.config = cfg
+                saveConfig()
             }
         }
-    }
-
-    func updateIcon() {
-        guard let cfg = config else {
-            setIcon(color: .systemGray, label: "● NUSB")
-            return
-        }
-        let running = bridgeRunning()
-        let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
-
-        var color: NSColor
-        if cfg.agent_host.isEmpty {
-            color = .systemGray
-        } else if running && socket {
-            color = currentDevices.isEmpty ? .systemOrange : .systemGreen
-        } else if running {
-            color = .systemYellow
-        } else {
-            color = .systemGray
-        }
-        setIcon(color: color, label: "● NUSB")
+        switchToStore(store)
     }
 
     @objc func promptAddCustomStore() {
         let alert = NSAlert()
         alert.messageText = "Добавить магазин"
-        alert.informativeText = "Введите IP-адрес или имя хоста магазина (например: 127.0.0.1 или 100.x.y.z):"
+        alert.informativeText = "Введите IP-адрес или имя хоста магазина (например: 100.x.y.z или 127.0.0.1):"
         alert.addButton(withTitle: "Добавить")
         alert.addButton(withTitle: "Отмена")
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        input.placeholderString = "127.0.0.1 или 100.115.10.4"
+        input.placeholderString = "100.115.10.4 или 127.0.0.1"
         alert.accessoryView = input
 
         if alert.runModal() == .alertFirstButtonReturn {
@@ -337,12 +315,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func triggerTailscaleDiscovery() {
         Task {
-            await discoverTailscaleStores()
+            await discoverTailscaleStores(showDialog: true)
         }
     }
 
-    func discoverTailscaleStores() async {
-        let peers = await Task.detached { () -> [StoreConfig] in
+    func discoverTailscaleStores(showDialog: Bool) async {
+        let (peers, errorMsg) = await Task.detached { () -> ([StoreConfig], String?) in
             let paths = [
                 "/usr/local/bin/tailscale",
                 "/opt/homebrew/bin/tailscale",
@@ -356,7 +334,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     break
                 }
             }
-            guard let bin = binPath else { return [] }
+            guard let bin = binPath else {
+                return ([], "Утилита Tailscale CLI не найдена в системе.")
+            }
 
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: bin)
@@ -364,12 +344,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let pipe = Pipe()
             proc.standardOutput = pipe
             proc.standardError = Pipe()
-            do { try proc.run() } catch { return [] }
+            do { try proc.run() } catch {
+                return ([], "Не удалось запустить утилиту tailscale status.")
+            }
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let peerMap = json["Peer"] as? [String: [String: Any]] else {
-                return []
+                return ([], "Tailscale пока не подключён или в вашей сети нет других узлов.")
             }
 
             var result: [StoreConfig] = []
@@ -388,24 +370,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     ))
                 }
             }
-            return result
+            return (result, nil)
         }.value
 
-        guard !peers.isEmpty else { return }
+        var newFoundCount = 0
+        if !peers.isEmpty {
+            var updated = currentStores
+            for p in peers {
+                if !updated.contains(where: { $0.host == p.host }) {
+                    updated.append(p)
+                    newFoundCount += 1
+                }
+            }
+            self.currentStores = updated
+            if var cfg = config {
+                cfg.stores = updated
+                self.config = cfg
+                saveConfig()
+            }
+            updateIcon()
+        }
 
-        var updated = currentStores
-        for p in peers {
-            if !updated.contains(where: { $0.host == p.host }) {
-                updated.append(p)
+        if showDialog {
+            let alert = NSAlert()
+            alert.messageText = "Сканирование сети Tailscale"
+            if let errorMsg {
+                alert.informativeText = "\(errorMsg)\n\nДля тестирования локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
+            } else if newFoundCount > 0 {
+                alert.informativeText = "Сканирование завершено! Добавлено новых магазинов: \(newFoundCount)."
+            } else if !peers.isEmpty {
+                alert.informativeText = "Сканирование завершено! Все найденные магазины (\(peers.count)) уже есть в вашем списке."
+            } else {
+                alert.informativeText = "В вашей сети Tailscale пока нет активных магазинов.\n\nДля подключения локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
+            }
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    // MARK: - Polling & Icon Status
+
+    func pollStatus() {
+        guard let cfg = config else {
+            setIcon(color: .systemGray, label: "● NUSB")
+            return
+        }
+
+        updateIcon()
+
+        let running = bridgeRunning()
+        let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
+
+        if running && socket && !checkInFlight {
+            checkInFlight = true
+            let cfgCopy = cfg
+            Task.detached { [weak self] in
+                let devices = Self.queryDevices(cfgCopy)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.checkInFlight = false
+                    self.currentDevices = devices
+                    self.tunnelActive = !devices.isEmpty
+                    self.updateIcon()
+                }
             }
         }
-        self.currentStores = updated
-        if var cfg = config {
-            cfg.stores = updated
-            self.config = cfg
-            saveConfig()
+    }
+
+    func updateIcon() {
+        guard let cfg = config else {
+            setIcon(color: .systemGray, label: "● NUSB")
+            return
         }
-        updateIcon()
+        let running = bridgeRunning()
+        let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
+
+        var color: NSColor
+        if cfg.agent_host.isEmpty {
+            color = .systemGray
+        } else if running && socket {
+            color = currentDevices.isEmpty ? .systemOrange : .systemGreen
+        } else if running {
+            color = .systemYellow
+        } else {
+            color = .systemGray
+        }
+        setIcon(color: color, label: "● NUSB")
     }
 
     func setIcon(color: NSColor, label: String) {
