@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var tunnelActive = false
     var reportRunning = false
     var isScanning = false
+    var scanStatusMessage: String?
 
     private var checkInFlight = false
     private var currentStores: [StoreConfig] = []
@@ -178,6 +179,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let scanItem = NSMenuItem(title: "🔄 Сканировать сеть Tailscale", action: #selector(triggerTailscaleDiscovery), keyEquivalent: "r")
             scanItem.target = self
             menu.addItem(scanItem)
+        }
+
+        if let msg = scanStatusMessage {
+            let msgItem = NSMenuItem(title: "ℹ️ \(msg)", action: nil, keyEquivalent: "")
+            msgItem.isEnabled = false
+            menu.addItem(msgItem)
         }
 
         let addItem = NSMenuItem(title: "➕ Добавить другой адрес (IP / Host)…", action: #selector(promptAddCustomStore), keyEquivalent: "a")
@@ -331,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func discoverTailscaleStores(showDialog: Bool) async {
         isScanning = true
+        scanStatusMessage = "Сканирование…"
         updateIcon()
 
         let (peers, errorMsg) = await Task.detached { () -> ([StoreConfig], String?) in
@@ -348,7 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
             guard let bin = binPath else {
-                return ([], "Утилита Tailscale CLI не найдена в системе.")
+                return ([], "Tailscale CLI не найден в системе.")
             }
 
             let proc = Process()
@@ -358,13 +366,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             proc.standardOutput = pipe
             proc.standardError = Pipe()
             do { try proc.run() } catch {
-                return ([], "Не удалось запустить утилиту tailscale status.")
+                return ([], "Не удалось запустить tailscale status.")
             }
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let peerMap = json["Peer"] as? [String: [String: Any]] else {
-                return ([], "Tailscale пока не подключён или в вашей сети нет других узлов.")
+                return ([], "Tailscale не подключен или сеть пуста.")
             }
 
             var result: [StoreConfig] = []
@@ -404,22 +412,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 saveConfig()
             }
         }
+
+        let summaryText: String
+        if let errorMsg {
+            summaryText = errorMsg
+        } else if newFoundCount > 0 {
+            summaryText = "Найдено новых магазинов: \(newFoundCount)"
+        } else if !peers.isEmpty {
+            summaryText = "Все магазины (\(peers.count)) уже в списке"
+        } else {
+            summaryText = "Активных магазинов в Tailscale не найдено"
+        }
+        self.scanStatusMessage = summaryText
         updateIcon()
 
         if showDialog {
-            let alert = NSAlert()
-            alert.messageText = "Результат сканирования сети"
-            if let errorMsg {
-                alert.informativeText = "\(errorMsg)\n\nДля тестирования локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
-            } else if newFoundCount > 0 {
-                alert.informativeText = "Сканирование завершено! Добавлено новых магазинов: \(newFoundCount)."
-            } else if !peers.isEmpty {
-                alert.informativeText = "Сканирование завершено! Все найденные магазины (\(peers.count)) уже есть в вашем списке."
-            } else {
-                alert.informativeText = "В вашей сети Tailscale пока нет активных магазинов.\n\nДля подключения локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                let alert = NSAlert()
+                alert.messageText = "Результат сканирования сети"
+                if let errorMsg {
+                    alert.informativeText = "\(errorMsg)\n\nДля подключения локальной ВМ нажмите в меню «Подключить локальную ВМ Tart (127.0.0.1)»."
+                } else if newFoundCount > 0 {
+                    alert.informativeText = "Сканирование завершено! Добавлено новых магазинов: \(newFoundCount)."
+                } else if !peers.isEmpty {
+                    alert.informativeText = "Сканирование завершено! Все найденные магазины (\(peers.count)) уже есть в вашем списке."
+                } else {
+                    alert.informativeText = "В вашей сети Tailscale пока нет активных магазинов.\n\nДля подключения локальной ВМ нажмите «Подключить локальную ВМ Tart (127.0.0.1)»."
+                }
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
             }
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
         }
     }
 
