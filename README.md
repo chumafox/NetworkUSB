@@ -6,7 +6,7 @@
 
 ## Что это и зачем
 
-При диагностике iPhone в сети магазинов возникает проблема: диагностическое ПО ([iScan](../iScan)) работает на центральном Mac мастера, а iPhone физически подключён к другому Mac в торговом зале. `libimobiledevice` и `pymobiledevice3` умеют работать только с локально подключённым устройством через `/var/run/usbmuxd`.
+При диагностике iPhone в сети магазинов возникает проблема: диагностическое ПО ([iScan](https://github.com/chumafox/iScan)) работает на центральном Mac мастера, а iPhone физически подключён к другому Mac в торговом зале. `libimobiledevice` и `pymobiledevice3` умеют работать только с локально подключённым устройством через `/var/run/usbmuxd`.
 
 **NetworkUSB решает это:** туннелирует UNIX-сокет `usbmuxd` между двумя машинами по сети так, что для диагностического ПО всё выглядит как локальное подключение.
 
@@ -17,6 +17,18 @@ iPhone ── USB ── [ Mac в магазине ]          [ Mac мастер
                                                      │
                                               iscan / pymobiledevice3
 ```
+
+---
+
+## Связанные проекты
+
+**NetworkUSB** создан, чтобы работать в паре с **[iScan](https://github.com/chumafox/iScan)** — iOS-диагностикой, генерирующей подробные HTML-отчёты. NetworkUSB даёт iScan видеть iPhone, физически подключённый к удалённому Mac (машине клиента), как локально подключённое устройство:
+
+```
+iPhone ── USB ── [usbmuxd-agent] ──TCP/TLS── [usbmuxd-bridge] ── /tmp/usbmuxd.sock ── iScan
+```
+
+См. также: [chumafox/iScan — iOS device diagnostics](https://github.com/chumafox/iScan)
 
 ---
 
