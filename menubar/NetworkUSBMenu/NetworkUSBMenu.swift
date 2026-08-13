@@ -64,11 +64,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func loadConfig() {
-        guard let data = try? Data(contentsOf: CONFIG_PATH),
-              let cfg = try? JSONDecoder().decode(Config.self, from: data) else {
+        if let data = try? Data(contentsOf: CONFIG_PATH),
+           let cfg = try? JSONDecoder().decode(Config.self, from: data) {
+            config = cfg
             return
         }
-        config = cfg
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let fallback = Config(
+            agent_host: "",
+            agent_port: 8721,
+            token: "",
+            bridge_bin: "\(home)/Projects/NetworkUSB/.venv/bin/usbmuxd-bridge",
+            socket_path: "/tmp/usbmuxd.sock",
+            device_cmd: ["\(home)/Projects/iScan/.venv/bin/pymobiledevice3", "usbmux", "list"],
+            log_path: "\(home)/Library/Logs/networkusb-bridge.log",
+            report_cmd: ["\(home)/Projects/iScan/.venv/bin/iscan", "report"],
+            report_dir: "\(home)/Projects/iScan",
+            open_report: true,
+            auto_start: false,
+            stores: [],
+            active_store_id: nil
+        )
+        config = fallback
+        saveConfig()
     }
 
     func saveConfig() {
