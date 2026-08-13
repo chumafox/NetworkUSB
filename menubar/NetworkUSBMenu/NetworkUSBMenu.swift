@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     var tunnelActive = false
     var reportRunning = false
+    private var checkInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadConfig()
@@ -95,14 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let running = bridgeRunning()
         let socket = FileManager.default.fileExists(atPath: cfg.socket_path)
-        let devices = devices(cfg)
 
         var color: NSColor
         var status: String
-        if running && socket && !devices.isEmpty {
-            color = .systemGreen
-            status = "Tunnel: Connected (\(devices.count))"
-        } else if running && socket {
+        if running && socket {
             color = .systemOrange
             status = "Tunnel: no device"
         } else if running {
@@ -114,13 +111,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         setIcon(color: color, label: "● NUSB")
         statusTitle.title = status
-        deviceItem.title = deviceLabel(devices)
-        // "Get Info" only makes sense when the tunnel is up AND a device is present.
-        tunnelActive = running && socket && !devices.isEmpty
-        getInfoItem.isEnabled = tunnelActive && !reportRunning
+        deviceItem.title = "Device: …"
+        tunnelActive = false
+        getInfoItem.isEnabled = false
         startItem.isHidden = running
         stopItem.isHidden = !running
         logItem.isEnabled = FileManager.default.fileExists(atPath: cfg.log_path)
+
+        // Проверка устройств — только когда туннель поднят, и асинхронно:
+        // команда pymobiledevice3 уходит в фон, чтобы не блокировать главный
+        // поток (иначе выпадающее меню замирает и не открывается).
+        if running && socket && !checkInFlight {
+            checkInFlight = true
+            let cfgCopy = cfg
+            Task.detached { [weak self] in
+                let devices = Self.queryDevices(cfgCopy)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.checkInFlight = false
+                    guard self.bridgeRunning(),
+                          FileManager.default.fileExists(atPath: cfgCopy.socket_path) else { return }
+                    self.tunnelActive = !devices.isEmpty
+                    self.getInfoItem.isEnabled = self.tunnelActive && !self.reportRunning
+                    self.deviceItem.title = self.deviceLabel(devices)
+                    self.setIcon(color: devices.isEmpty ? .systemOrange : .systemGreen, label: "● NUSB")
+                    self.statusTitle.title = devices.isEmpty ? "Tunnel: no device" : "Tunnel: Connected (\(devices.count))"
+                }
+            }
+        }
     }
 
     func setIcon(color: NSColor, label: String) {
@@ -135,8 +153,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridge?.isRunning ?? false
     }
 
-    /// Run the configured device list command and return parsed entries.
-    func devices(_ cfg: Config) -> [[String: Any]] {
+    /// Run the configured device list command off the main thread with a hard
+    /// timeout so a hung pymobiledevice3 (e.g. when the socket is stale) can
+    /// never freeze the menu.
+    nonisolated static func queryDevices(_ cfg: Config) -> [[String: Any]] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cfg.device_cmd[0])
         p.arguments = Array(cfg.device_cmd.dropFirst())
@@ -146,17 +166,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = Pipe()
-        do {
-            try p.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                return []
-            }
-            return arr
-        } catch {
+        do { try p.run() } catch { return [] }
+
+        let sema = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in sema.signal() }
+        if sema.wait(timeout: .now() + 6) == .timedOut {
+            p.terminate()
             return []
         }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return arr
     }
 
     func deviceLabel(_ devices: [[String: Any]]) -> String {
